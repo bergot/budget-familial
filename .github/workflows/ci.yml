@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      # Bibliothèques système nécessaires à Qt sous Linux (même sans écran).
+      - name: Dépendances système Qt (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 \
+            libdbus-1-3 libxcb-cursor0
+
+      - name: Installation (Python 3.14 lu dans .python-version)
+        run: uv sync
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Tests
+        run: uv run pytest
+
+  package:
+    name: Exécutable (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Dépendances système Qt (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 \
+            libdbus-1-3 libxcb-cursor0
+
+      - run: uv sync
+
+      - name: Construction avec PyInstaller
+        run: uv run pyinstaller --noconfirm --name budget-familial --windowed --paths src packaging/launcher.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: budget-familial-${{ runner.os }}
+          path: dist/budget-familial
