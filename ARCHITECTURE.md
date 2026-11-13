@@ -81,7 +81,7 @@ Les échéances sont développées entre le rapprochement et le budget.
 | Migrations de schéma | Alembic | Introduit à la fin de l'étape 2, avant les données réelles. |
 | Gestion du projet | uv | Environnement, dépendances, verrouillage. |
 | Tests | pytest | Base SQLite en mémoire. |
-| Qualité du code | ruff (lint + format) | Un seul outil. Vérification de types optionnelle (pyright ou mypy). |
+| Qualité du code | ruff (lint + format) | Un seul outil. Types vérifiés par mypy en mode strict (`uv run mypy`). |
 | Packaging | PyInstaller | Un build par système d'exploitation. |
 | Intégration continue | GitHub Actions | Matrice Linux / Windows. |
 | Licence | MIT | |
@@ -137,6 +137,21 @@ n'importe ni SQLAlchemy ni Qt.
 
 Les services reçoivent une `Session` SQLAlchemy en paramètre. Les valeurs de retour
 destinées à l'interface sont de simples `dataclass` immuables.
+
+**Conventions des services** (appliquées depuis l'étape 1) :
+
+- Un service est une fonction qui reçoit la `Session` en premier paramètre.
+- Un service fait `session.flush()` mais **ne fait jamais de commit** : l'appelant valide avec
+  `with session.begin():` ou `session.commit()`. Plusieurs appels forment ainsi une seule
+  transaction, annulée en bloc si l'un d'eux échoue.
+- Les erreurs métier sont des exceptions qui héritent de `BudgetError`
+  (`NotFoundError`, `DuplicateError`, `InvalidError`, dans `domain/errors.py`) ; l'interface
+  les attrape pour afficher un message.
+- Les données d'un formulaire entrent sous forme de `dataclass` immuable
+  (`TransactionData`, `TransferData`) ; les identifiants (`account_id`...) sont passés, pas les
+  objets ORM.
+- Rien ne lit l'horloge en cachette : les fonctions qui dépendent de la date du jour
+  acceptent un paramètre `today`, ce qui rend les tests déterministes.
 
 ---
 
@@ -203,6 +218,15 @@ géré nativement par uv.
 | `Reconciliation` | `id`, `account_id`, `statement_date`, `statement_balance_cents` | |
 | `Schedule` | `id`, `account_id`, `payee_id`, `amount_cents`, `category_id`, `payment_method_id`, `notes`, `frequency`, `start_date`, `end_date` (nullable), `last_generated_date`, `transfer_account_id` (nullable) | `transfer_account_id` renseigné pour un virement planifié |
 | `BudgetLine` | `id`, `category_id`, `year`, `month`, `planned_cents` | Unique sur (`category_id`, `year`, `month`) |
+
+### Mise en œuvre par étapes
+
+Les tables sont créées au fil des étapes. L'étape 1 livre `Account`, `Category`, `Payee`,
+`PaymentMethod` et `Transaction` (sans `status`, `reconciliation_id` ni `schedule_id`, ajoutés
+aux étapes 3 et 4 avec leurs tables `Reconciliation` et `Schedule`). Les tables portent des noms
+pluriels en base (`accounts`, `transactions`...). Dans le code, l'attribut `date` de
+`Transaction` est annoté `dt.date` (avec `import datetime as dt`) pour éviter qu'un attribut
+du même nom que son type ne trouble les annotations.
 
 ### Relations
 
@@ -476,13 +500,15 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 
 **Livrable** : squelette qui s'exécute, se teste et se package.
 
-### Étape 1 : modèle et logique métier (priorité : comptes)
+### Étape 1 : modèle et logique métier (priorité : comptes) : terminée
 
-- Modèles `Account`, `Category`, `Payee`, `PaymentMethod`, `Transaction`.
-- Services : comptes, catégories à deux niveaux, opérations, **virements liés**,
-  solde actuel et prévisionnel.
 - Moteur SQLite avec `PRAGMA foreign_keys=ON`, création du fichier de données.
-- Tests unitaires complets.
+- Modèles `Account`, `Category`, `Payee`, `PaymentMethod`, `Transaction`.
+- Montants : conversion centimes / texte français (`domain/money.py`).
+- Services : comptes (clôture, suppression refusée s'il y a des opérations), catégories à
+  deux niveaux, tiers et moyens de paiement, opérations, **virements liés**, solde actuel et
+  prévisionnel, registre avec solde cumulé.
+- Tests unitaires et un scénario de bout en bout sur fichier SQLite.
 
 **Livrable** : logique métier de base, entièrement testée, sans interface.
 
