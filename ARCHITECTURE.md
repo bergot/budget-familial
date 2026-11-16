@@ -188,18 +188,20 @@ budget-familial/
 │   ├── __main__.py             # point d'entrée (option --base FICHIER)
 │   ├── paths.py                # emplacement des données (pathlib + platformdirs)
 │   ├── domain/
+│   │   ├── enums.py            # ReconciliationStatus (none / pointed / reconciled)
 │   │   ├── errors.py           # BudgetError, NotFoundError, DuplicateError, InvalidError
 │   │   └── money.py            # centimes <-> "12,50 €"
 │   ├── db/
 │   │   ├── base.py             # moteur, PRAGMA foreign_keys=ON, unit_of_work
 │   │   ├── models.py           # tables
 │   │   ├── migrate.py          # applique les migrations au démarrage
-│   │   └── migrations/         # scripts Alembic (env.py, versions/0001_...)
+│   │   └── migrations/         # scripts Alembic (env.py, versions/0001, 0002...)
 │   ├── services/
 │   │   ├── accounts.py         # comptes, soldes
 │   │   ├── categories.py
 │   │   ├── lookups.py          # tiers, moyens de paiement
 │   │   ├── transactions.py     # opérations, virements, registre
+│   │   ├── reconciliation.py   # pointage, écart, validation, annulation
 │   │   └── choices.py          # listes de choix pour les formulaires
 │   └── ui/
 │       ├── app.py              # QApplication, ouverture de la base, boucle d'événements
@@ -207,8 +209,8 @@ budget-familial/
 │       ├── main_window.py      # fenêtre principale, menus, actions
 │       ├── account_list.py     # liste des comptes (QTableView)
 │       ├── register_view.py    # registre d'un compte (QTableView)
-│       ├── models/             # QAbstractTableModel : account_model, register_model
-│       └── dialogs/            # account, transaction, transfer, categories, common
+│       ├── models/             # QAbstractTableModel : account, register, pointing
+│       └── dialogs/            # account, transaction, transfer, categories, reconciliation
 └── tests/
     ├── conftest.py             # base SQLite en mémoire, comptes d'exemple
     ├── domain/  db/  services/ # tests sans Qt
@@ -216,8 +218,7 @@ budget-familial/
 ```
 
 L'agencement `src/` empêche d'importer par accident le code non installé et est
-géré nativement par uv. Les dossiers `rapprochement`, `échéances` et `budget` s'ajouteront
-dans `services/` et `ui/` aux étapes suivantes.
+géré nativement par uv. Les échéances et le budget s'ajouteront dans `services/` et `ui/` aux étapes suivantes.
 
 ---
 
@@ -236,12 +237,18 @@ dans `services/` et `ui/` aux étapes suivantes.
 
 ### Mise en œuvre par étapes
 
-Les tables sont créées au fil des étapes. L'étape 1 livre `Account`, `Category`, `Payee`,
-`PaymentMethod` et `Transaction` (sans `status`, `reconciliation_id` ni `schedule_id`, ajoutés
-aux étapes 3 et 4 avec leurs tables `Reconciliation` et `Schedule`). Les tables portent des noms
-pluriels en base (`accounts`, `transactions`...). Dans le code, l'attribut `date` de
-`Transaction` est annoté `dt.date` (avec `import datetime as dt`) pour éviter qu'un attribut
-du même nom que son type ne trouble les annotations.
+Les tables sont créées au fil des étapes, chacune avec sa migration Alembic.
+
+| Étape | Tables et colonnes ajoutées | Migration |
+|---|---|---|
+| 1 | `Account`, `Category`, `Payee`, `PaymentMethod`, `Transaction` | `0001` |
+| 3 | `Reconciliation` ; `Transaction.status` et `Transaction.reconciliation_id` | `0002` |
+| 4 | `Schedule` ; `Transaction.schedule_id` | à venir |
+| 5 | `BudgetLine` | à venir |
+
+Les tables portent des noms pluriels en base (`accounts`, `transactions`...). Dans le code,
+l'attribut `date` de `Transaction` est annoté `dt.date` (avec `import datetime as dt`) pour
+éviter qu'un attribut du même nom que son type ne trouble les annotations.
 
 ### Relations
 
@@ -258,8 +265,8 @@ Trois états, repris de la logique de Grisbi :
 | Statut | Signification |
 |---|---|
 | `NONE` | Non pointée |
-| `POINTED` | Cochée lors d'un rapprochement en cours |
-| `RECONCILED` | Rapprochement validé (rattachée à une `Reconciliation`) |
+| `POINTED` | Cochée lors d'un rapprochement en cours (enregistrée aussitôt en base) |
+| `RECONCILED` | Rapprochement validé : rattachée à une `Reconciliation`, **figée** |
 
 ### Points de vigilance SQLite
 
@@ -289,9 +296,21 @@ Pour modifier le schéma (nouvelle colonne, nouvelle table) :
    pas exactement les modèles.
 
 SQLite sait peu modifier une table existante : Alembic passe par le mode « batch » (il recrée
-la table). Les clés étrangères étant actives sur nos connexions, une migration qui recrée une
-table liée à d'autres demandera un `PRAGMA foreign_keys=OFF` le temps de l'opération (à traiter
-quand le cas se présentera, probablement à l'étape 3).
+la table : copie, suppression, renommage). Cela a deux conséquences, traitées dans
+`db/migrate.py` :
+
+- **Les clés étrangères sont désactivées pendant la migration**, puis un `PRAGMA
+  foreign_key_check` vérifie l'intégrité. Sans cela, la suppression de la table ancienne
+  déclenchait l'action `ON DELETE SET NULL` de `transfer_peer_id` et **effaçait en silence le
+  lien entre les deux moitiés de chaque virement**. Ce défaut a été trouvé par
+  `test_upgrade_from_version_1_keeps_existing_data` : toute migration touchant une table
+  existante doit être testée avec des données, pas seulement sur une base vide.
+- **Le fichier de base est copié avant toute migration en attente** (`budget.sqlite.avant-0002.bak`
+  à côté du fichier) : SQLite n'annule pas proprement un `ALTER` qui échoue en cours de route.
+
+Autres points de vigilance : nommer les contraintes de clé étrangère (sinon le `downgrade`
+ne peut pas les supprimer), donner un `server_default` aux nouvelles colonnes obligatoires
+(les lignes existantes en ont besoin), et relire le fichier généré.
 
 ---
 
@@ -313,10 +332,24 @@ quand le cas se présentera, probablement à l'étape 3).
 ### Rapprochement
 
 1. L'utilisateur saisit la date et le solde du relevé.
-2. Il pointe les opérations présentes sur le relevé (`NONE` → `POINTED`).
-3. Écart = solde du relevé − (dernier solde rapproché + somme des opérations pointées).
-4. La validation n'est possible que si l'écart est nul ; les opérations passent alors
-   à `RECONCILED`.
+2. Il pointe les opérations présentes sur le relevé (`NONE` -> `POINTED`). Le pointage est
+   enregistré à chaque case cochée : on peut fermer l'écran et reprendre plus tard.
+3. Écart = solde du relevé - (solde rapproché + total des opérations pointées), où le solde
+   rapproché = solde initial + opérations déjà rapprochées.
+4. La validation n'est possible que si l'écart est nul et qu'au moins une opération est
+   pointée ; les opérations passent alors à `RECONCILED`.
+
+Règles associées :
+
+- Chaque compte se rapproche séparément ; les deux moitiés d'un virement aussi.
+- La date d'un relevé ne peut pas précéder celle du dernier rapprochement du compte.
+- Une opération **rapprochée est figée** : modification et suppression refusées (virement
+  compris, dès qu'une moitié est rapprochée).
+- Seul le **dernier** rapprochement d'un compte peut être annulé (les soldes rapprochés se
+  suivent en chaîne) ; ses opérations redeviennent non pointées et modifiables.
+- Une opération pointée reste modifiable ; si on la change de compte, son pointage est remis à zéro.
+- L'écran n'affiche que les opérations non rapprochées, jusqu'à la date du relevé (plus toutes
+  celles déjà pointées) ; une case permet d'afficher les opérations postérieures.
 
 ### Échéances
 
@@ -467,11 +500,14 @@ def data_file() -> Path:
    un `QAbstractTableModel` écrit par nos soins (`rowCount`, `columnCount`, `data`,
    et `setData` + `flags` pour l'édition). Ce mécanisme sert au registre et à la grille
    de budget.
-3. **Boucle d'événements** : `app.exec()` tourne tant que la fenêtre est ouverte.
+3. **Cellules modifiables** : pour qu'une cellule puisse être cochée ou éditée, le modèle
+   ajoute `flags()` (ex. `ItemIsUserCheckable`), répond au rôle `CheckStateRole` dans `data()`
+   et implémente `setData()`, que Qt appelle quand l'utilisateur agit (voir `pointing_model.py`).
+4. **Boucle d'événements** : `app.exec()` tourne tant que la fenêtre est ouverte.
    Aucune opération longue ne doit la bloquer (non critique à notre volume de données).
-4. **Dialogues** : `QDialog` pour le formulaire de saisie, avec validation avant
+5. **Dialogues** : `QDialog` pour le formulaire de saisie, avec validation avant
    fermeture.
-5. **Français uniquement** : les textes sont écrits directement en français ; pas de
+6. **Français uniquement** : les textes sont écrits directement en français ; pas de
    chaîne de traduction à gérer. Les formats de date et de nombre suivent la locale
    française.
 
@@ -577,11 +613,15 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 
 **Livrable** : première version utilisable au quotidien (comptes + saisie).
 
-### Étape 3 : rapprochement (priorité : rapprochement)
+### Étape 3 : rapprochement (priorité : rapprochement) : terminée
 
-- Modèle `Reconciliation` et statut de pointage.
-- Service de rapprochement (calcul de l'écart, validation).
-- Écran de rapprochement : saisie du relevé, pointage, validation.
+- Table `Reconciliation`, statut de pointage des opérations, première migration sur base
+  peuplée (`0002`), avec désactivation des clés étrangères pendant la migration et
+  sauvegarde préalable du fichier.
+- Service de rapprochement : pointage, écart, validation, annulation du dernier
+  rapprochement, historique ; opérations rapprochées figées.
+- Écran de rapprochement (cases à cocher, écart en direct, validation) ; colonne « R » dans le
+  registre ; état du rapprochement affiché sous le titre du compte.
 
 **Livrable** : rapprochement bancaire fonctionnel sur les deux banques.
 

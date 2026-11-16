@@ -1,7 +1,7 @@
 """Éléments communs aux boîtes de dialogue."""
 
 import datetime as dt
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
@@ -12,7 +12,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QWidget,
 )
+from sqlalchemy.orm import Session, sessionmaker
 
+from budget.db.base import unit_of_work
+from budget.domain.errors import BudgetError
 from budget.domain.money import format_cents, parse_amount
 from budget.services.choices import Choice
 
@@ -94,3 +97,15 @@ def confirm(parent: QWidget | None, title: str, text: str, action_label: str) ->
     box.addButton("Annuler", QMessageBox.ButtonRole.RejectRole)
     box.exec()
     return box.clickedButton() is action
+
+
+def run_action[T](
+    parent: QWidget | None, factory: sessionmaker[Session], action: Callable[[Session], T]
+) -> T | None:
+    """Exécute `action` dans une transaction ; si elle échoue, affiche l'erreur et renvoie None."""
+    try:
+        with unit_of_work(factory) as session:
+            return action(session)
+    except BudgetError as error:
+        show_error(parent, error)
+        return None

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from budget.db.models import Account, Category, Payee, PaymentMethod, Transaction
+from budget.domain.enums import ReconciliationStatus
 from budget.domain.errors import InvalidError
 from budget.services._common import require
 
@@ -62,6 +63,7 @@ class RegisterLine:
     notes: str
     transfer_account_id: int | None  # autre compte du virement, sinon None
     transfer_account_name: str
+    status: ReconciliationStatus = ReconciliationStatus.NONE
 
     @property
     def is_transfer(self) -> bool:
@@ -125,6 +127,22 @@ def _validate_transfer(session: Session, data: TransferData) -> None:
     )
 
 
+def _ensure_not_reconciled(*transactions: Transaction) -> None:
+    """Une opération rapprochée est figée : elle figure sur un relevé déjà validé."""
+    if any(t.status is ReconciliationStatus.RECONCILED for t in transactions):
+        raise InvalidError(
+            "Cette opération est rapprochée : annulez d'abord le dernier rapprochement "
+            "du compte pour pouvoir la modifier ou la supprimer"
+        )
+
+
+def _move_to_account(transaction: Transaction, account_id: int) -> None:
+    """Change de compte ; le pointage, propre à un compte, est remis à zéro."""
+    if transaction.account_id != account_id:
+        transaction.account_id = account_id
+        transaction.status = ReconciliationStatus.NONE
+
+
 # --- Opérations -----------------------------------------------------------------------
 
 
@@ -152,8 +170,9 @@ def update_transaction(session: Session, transaction_id: int, data: TransactionD
     transaction = get_transaction(session, transaction_id)
     if transaction.is_transfer:
         raise InvalidError("Cette opération fait partie d'un virement : utilisez update_transfer")
+    _ensure_not_reconciled(transaction)
     _validate_transaction(session, data)
-    transaction.account_id = data.account_id
+    _move_to_account(transaction, data.account_id)
     transaction.date = data.date
     transaction.amount_cents = data.amount_cents
     transaction.payee_id = data.payee_id
@@ -173,6 +192,7 @@ def delete_transaction(session: Session, transaction_id: int) -> None:
         if transaction.transfer_peer_id is not None
         else None
     )
+    _ensure_not_reconciled(transaction, *([peer] if peer is not None else []))
     if peer is not None:
         # Les deux moitiés se désignent mutuellement : l'ORM ne sait pas laquelle supprimer
         # en premier (dépendance circulaire). On défait donc d'abord le lien.
@@ -226,9 +246,10 @@ def update_transfer(
 ) -> tuple[Transaction, Transaction]:
     """Modifie un virement (on peut passer l'une ou l'autre moitié)."""
     outgoing, incoming = _transfer_legs(session, transaction_id)
+    _ensure_not_reconciled(outgoing, incoming)
     _validate_transfer(session, data)
-    outgoing.account_id = data.from_account_id
-    incoming.account_id = data.to_account_id
+    _move_to_account(outgoing, data.from_account_id)
+    _move_to_account(incoming, data.to_account_id)
     for leg, amount in ((outgoing, -data.amount_cents), (incoming, data.amount_cents)):
         leg.date = data.date
         leg.amount_cents = amount
@@ -303,6 +324,7 @@ def register_lines(session: Session, account_id: int) -> list[RegisterLine]:
                 notes=t.notes,
                 transfer_account_id=peer_account.id if peer_account else None,
                 transfer_account_name=peer_account.name if peer_account else "",
+                status=t.status,
             )
         )
     return lines

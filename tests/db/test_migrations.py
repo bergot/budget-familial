@@ -41,3 +41,106 @@ def test_upgrade_twice_keeps_existing_data(tmp_path: Path) -> None:
     with factory() as session:
         (account,) = accounts.list_accounts(session)
         assert account.initial_balance_cents == 1000
+
+
+def _insert_version_1_data(engine) -> None:  # type: ignore[no-untyped-def]
+    """Données telles que l'application de l'étape 2 les aurait écrites (schéma 0001)."""
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO accounts (id, name, bank, initial_balance_cents, closed) VALUES "
+            "(1, 'SG', NULL, 100000, 0), (2, 'Boursorama', NULL, 0, 0)"
+        )
+        connection.exec_driver_sql("INSERT INTO payees (id, name) VALUES (1, 'Carrefour')")
+        connection.exec_driver_sql(
+            "INSERT INTO transactions "
+            "(id, account_id, date, amount_cents, payee_id, notes, transfer_peer_id) VALUES "
+            "(1, 1, '2026-03-01', -4250, 1, 'courses', NULL), "
+            "(2, 1, '2026-03-02', -30000, NULL, '', NULL), "
+            "(3, 2, '2026-03-02', 30000, NULL, '', NULL)"
+        )
+        # Le virement : deux lignes qui se désignent mutuellement.
+        connection.exec_driver_sql("UPDATE transactions SET transfer_peer_id = 3 WHERE id = 2")
+        connection.exec_driver_sql("UPDATE transactions SET transfer_peer_id = 2 WHERE id = 3")
+
+
+def test_upgrade_from_version_1_keeps_existing_data(tmp_path: Path) -> None:
+    """Le cas réel : une base déjà remplie passe de la version 0001 à la dernière."""
+    engine = create_db_engine(tmp_path / "budget.sqlite")
+    upgrade_to_head(engine, revision="0001")
+    _insert_version_1_data(engine)
+
+    upgrade_to_head(engine)  # applique 0002 sur une base qui contient des données
+
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT id, account_id, amount_cents, notes, transfer_peer_id, status, "
+            "reconciliation_id FROM transactions ORDER BY id"
+        ).fetchall()
+        assert rows == [
+            (1, 1, -4250, "courses", None, "none", None),
+            (2, 1, -30000, "", 3, "none", None),  # le lien du virement a survécu
+            (3, 2, 30000, "", 2, "none", None),
+        ]
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+        # Les clés étrangères sont de nouveau actives pour l'application.
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+
+def test_upgrade_from_version_1_gives_a_working_schema(tmp_path: Path) -> None:
+    engine = create_db_engine(tmp_path / "budget.sqlite")
+    upgrade_to_head(engine, revision="0001")
+    _insert_version_1_data(engine)
+    upgrade_to_head(engine)
+
+    with engine.connect() as connection:
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+    assert differences == []
+
+
+def test_downgrade_is_possible(tmp_path: Path) -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    from budget.db.migrate import MIGRATIONS_DIR
+
+    engine = create_db_engine(tmp_path / "budget.sqlite")
+    upgrade_to_head(engine)
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    with engine.begin() as connection:
+        config.attributes["connection"] = connection
+        command.downgrade(config, "0001")
+    assert "reconciliations" not in set(inspect(engine).get_table_names())
+
+
+def test_backup_is_made_before_migrating_an_existing_database(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "budget.sqlite"
+    engine = create_db_engine(path)
+    upgrade_to_head(engine, revision="0001")
+    _insert_version_1_data(engine)
+    assert list(tmp_path.glob("*.bak")) == []  # base neuve : rien à sauvegarder
+
+    upgrade_to_head(engine)
+
+    (backup,) = tmp_path.glob("*.bak")
+    assert backup.name == "budget.sqlite.avant-0002.bak"
+    with sqlite3.connect(backup) as old:  # la copie est l'ancienne version, avec ses données
+        columns = [row[1] for row in old.execute("PRAGMA table_info(transactions)")]
+        assert "status" not in columns
+        assert old.execute("SELECT count(*) FROM transactions").fetchone() == (3,)
+
+
+def test_no_backup_when_already_up_to_date(tmp_path: Path) -> None:
+    engine = create_db_engine(tmp_path / "budget.sqlite")
+    upgrade_to_head(engine)
+    upgrade_to_head(engine)  # redémarrage
+    assert list(tmp_path.glob("*.bak")) == []
+
+
+def test_foreign_keys_are_off_only_during_the_migration(tmp_path: Path) -> None:
+    engine = create_db_engine(tmp_path / "budget.sqlite")
+    upgrade_to_head(engine)
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1

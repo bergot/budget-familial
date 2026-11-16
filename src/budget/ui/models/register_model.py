@@ -6,6 +6,7 @@ from typing import Any
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPersistentModelIndex, Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 
+from budget.domain.enums import ReconciliationStatus
 from budget.domain.money import format_cents
 from budget.services.transactions import RegisterLine
 
@@ -13,11 +14,31 @@ _ROOT = QModelIndex()
 _GREY = QBrush(QColor("gray"))
 _RED = QBrush(QColor("#c0392b"))
 
-HEADERS = ("Date", "Tiers", "Catégorie", "Moyen", "Notes", "Débit", "Crédit", "Solde")
-COL_DATE, COL_PAYEE, COL_CATEGORY, COL_METHOD, COL_NOTES, COL_DEBIT, COL_CREDIT, COL_BALANCE = (
-    range(8)
-)
+HEADERS = ("Date", "Tiers", "Catégorie", "Moyen", "Notes", "R", "Débit", "Crédit", "Solde")
+(
+    COL_DATE,
+    COL_PAYEE,
+    COL_CATEGORY,
+    COL_METHOD,
+    COL_NOTES,
+    COL_STATUS,
+    COL_DEBIT,
+    COL_CREDIT,
+    COL_BALANCE,
+) = range(9)
 _RIGHT_ALIGNED = {COL_DEBIT, COL_CREDIT, COL_BALANCE}
+
+# Colonne « R » : le marqueur affiché et son infobulle.
+_STATUS_MARK = {
+    ReconciliationStatus.NONE: "",
+    ReconciliationStatus.POINTED: "●",
+    ReconciliationStatus.RECONCILED: "✓",
+}
+_STATUS_TIP = {
+    ReconciliationStatus.NONE: "",
+    ReconciliationStatus.POINTED: "Pointée (rapprochement en cours)",
+    ReconciliationStatus.RECONCILED: "Rapprochée : figée",
+}
 
 
 def payee_text(line: RegisterLine) -> str:
@@ -89,8 +110,14 @@ class RegisterTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return self._text(line, column)
 
-        if role == Qt.ItemDataRole.TextAlignmentRole and column in _RIGHT_ALIGNED:
-            return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if column in _RIGHT_ALIGNED:
+                return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if column == COL_STATUS:
+                return int(Qt.AlignmentFlag.AlignCenter)
+
+        if role == Qt.ItemDataRole.ToolTipRole and column == COL_STATUS:
+            return _STATUS_TIP[line.status] or None
 
         is_future = line.date > self._today
         if role == Qt.ItemDataRole.ForegroundRole:
@@ -114,6 +141,8 @@ class RegisterTableModel(QAbstractTableModel):
             return line.payment_method_name
         if column == COL_NOTES:
             return line.notes
+        if column == COL_STATUS:
+            return _STATUS_MARK[line.status]
         if column == COL_DEBIT:
             return format_cents(-line.amount_cents, symbol=False) if line.amount_cents < 0 else ""
         if column == COL_CREDIT:

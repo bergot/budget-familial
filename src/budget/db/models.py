@@ -9,10 +9,11 @@ Conventions :
 
 import datetime as dt
 
-from sqlalchemy import ForeignKey, Index, String
+from sqlalchemy import Enum, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from budget.db.base import Base
+from budget.domain.enums import ReconciliationStatus
 
 
 class Account(Base):
@@ -71,6 +72,17 @@ class PaymentMethod(Base):
     name: Mapped[str] = mapped_column(String(100), unique=True)
 
 
+class Reconciliation(Base):
+    """Un rapprochement validé : le solde du relevé à une date donnée."""
+
+    __tablename__ = "reconciliations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    statement_date: Mapped[dt.date]
+    statement_balance_cents: Mapped[int]
+
+
 class Transaction(Base):
     __tablename__ = "transactions"
     __table_args__ = (Index("ix_transactions_account_date", "account_id", "date"),)
@@ -83,6 +95,20 @@ class Transaction(Base):
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"))
     payment_method_id: Mapped[int | None] = mapped_column(ForeignKey("payment_methods.id"))
     notes: Mapped[str] = mapped_column(default="")
+    status: Mapped[ReconciliationStatus] = mapped_column(
+        Enum(
+            ReconciliationStatus,
+            native_enum=False,  # SQLite n'a pas de type énuméré : stocké comme du texte
+            length=20,
+            # On stocke « pointed » (la valeur) plutôt que « POINTED » (le nom du membre).
+            values_callable=lambda members: [member.value for member in members],
+        ),
+        default=ReconciliationStatus.NONE,
+        server_default=ReconciliationStatus.NONE.value,
+    )
+    reconciliation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("reconciliations.id", name="fk_transactions_reconciliation_id")
+    )
     # Pour un virement : l'autre moitié du couple d'opérations liées.
     transfer_peer_id: Mapped[int | None] = mapped_column(
         ForeignKey("transactions.id", ondelete="SET NULL")

@@ -154,3 +154,25 @@ def test_register_empty(qapp) -> None:  # type: ignore[no-untyped-def]
     model.set_lines([], TODAY)
     assert model.rowCount() == 0
     assert model.data(QModelIndex()) is None
+
+
+# --- Colonne « R » (pointage / rapprochement) ----------------------------------------------
+
+
+def test_register_status_column(qapp) -> None:  # type: ignore[no-untyped-def]
+    from budget.domain.enums import ReconciliationStatus as Status
+    from budget.ui.models.register_model import COL_STATUS
+
+    model = RegisterTableModel()
+    model.set_lines(
+        [
+            make_line(transaction_id=1, status=Status.NONE),
+            make_line(transaction_id=2, status=Status.POINTED),
+            make_line(transaction_id=3, status=Status.RECONCILED),
+        ],
+        TODAY,
+    )
+    assert [_text(model, row, COL_STATUS) for row in range(3)] == ["", "●", "✓"]
+    tip = model.data(model.index(2, COL_STATUS), Qt.ItemDataRole.ToolTipRole)
+    assert "figée" in tip
+    assert model.data(model.index(0, COL_STATUS), Qt.ItemDataRole.ToolTipRole) is None

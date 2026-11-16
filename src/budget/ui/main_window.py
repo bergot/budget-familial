@@ -18,8 +18,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from budget import __version__
 from budget.db.base import unit_of_work
+from budget.domain.enums import ReconciliationStatus
 from budget.domain.errors import BudgetError
+from budget.domain.money import format_cents
 from budget.services import accounts, lookups
+from budget.services import reconciliation as rec
 from budget.services import transactions as tx
 from budget.services.choices import load_choices
 from budget.services.transactions import RegisterLine, TransactionData
@@ -27,6 +30,7 @@ from budget.ui.account_list import AccountList
 from budget.ui.dialogs.account_dialog import AccountDialog, AccountInput
 from budget.ui.dialogs.categories_dialog import CategoriesDialog
 from budget.ui.dialogs.common import confirm, show_error
+from budget.ui.dialogs.reconciliation_dialog import ReconciliationDialog
 from budget.ui.dialogs.transaction_dialog import TransactionDialog, TransactionInput
 from budget.ui.dialogs.transfer_dialog import TransferDialog
 from budget.ui.register_view import RegisterView
@@ -54,11 +58,14 @@ class MainWindow(QMainWindow):
         title_font.setBold(True)
         title_font.setPointSizeF(title_font.pointSizeF() * 1.25)
         self._title.setFont(title_font)
+        self._subtitle = QLabel()  # état du rapprochement du compte
+        self._has_reconciliation = False
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(6, 0, 0, 0)
         right_layout.addWidget(self._title)
+        right_layout.addWidget(self._subtitle)
         right_layout.addWidget(self._register, stretch=1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -114,6 +121,13 @@ class MainWindow(QMainWindow):
             "&Supprimer l'opération…", self._on_delete_transaction, "Del"
         )
 
+        self.act_reconcile = self._make_action(
+            "&Rapprocher le compte…", self._on_reconcile, "Ctrl+R"
+        )
+        self.act_undo_reconcile = self._make_action(
+            "&Annuler le dernier rapprochement…", self._on_undo_reconcile
+        )
+
         self.act_categories = self._make_action("&Catégories…", self._on_categories)
         self.act_about = self._make_action("À &propos", self._on_about)
 
@@ -137,6 +151,10 @@ class MainWindow(QMainWindow):
         operation_menu.addAction(self.act_edit_transaction)
         operation_menu.addAction(self.act_delete_transaction)
 
+        reconcile_menu = bar.addMenu("&Rapprochement")
+        reconcile_menu.addAction(self.act_reconcile)
+        reconcile_menu.addAction(self.act_undo_reconcile)
+
         settings_menu = bar.addMenu("&Données")
         settings_menu.addAction(self.act_categories)
 
@@ -149,21 +167,27 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.act_new_transfer)
         toolbar.addAction(self.act_edit_transaction)
         toolbar.addAction(self.act_delete_transaction)
+        toolbar.addSeparator()
+        toolbar.addAction(self.act_reconcile)
 
     def _update_actions(self) -> None:
         balance = self._accounts.selected_balance()
+        line = self._register.selected_line()
         has_account = balance is not None
         is_closed = balance is not None and balance.closed
         can_edit = has_account and not is_closed
-        has_line = self._register.selected_line() is not None
+        # Une opération rapprochée est figée : on ne la modifie ni ne la supprime.
+        line_is_free = line is not None and line.status is not ReconciliationStatus.RECONCILED
 
         self.act_edit_account.setEnabled(has_account)
         self.act_toggle_closed.setEnabled(has_account)
         self.act_toggle_closed.setText("&Rouvrir le compte" if is_closed else "&Clôturer le compte")
         self.act_new_transaction.setEnabled(can_edit)
         self.act_new_transfer.setEnabled(can_edit)
-        self.act_edit_transaction.setEnabled(can_edit and has_line)
-        self.act_delete_transaction.setEnabled(has_account and has_line)
+        self.act_edit_transaction.setEnabled(can_edit and line_is_free)
+        self.act_delete_transaction.setEnabled(has_account and line_is_free)
+        self.act_reconcile.setEnabled(has_account)
+        self.act_undo_reconcile.setEnabled(has_account and self._has_reconciliation)
 
     # --- Chargement des données ---------------------------------------------------------
 
@@ -186,6 +210,8 @@ class MainWindow(QMainWindow):
         account_id = self._accounts.selected_account_id()
         if account_id is None:
             self._title.setText("Aucun compte : créez-en un via le menu Comptes")
+            self._subtitle.setText("")
+            self._has_reconciliation = False
             self._register.set_lines([], self._today())
         else:
             with self._factory() as session:
@@ -193,9 +219,29 @@ class MainWindow(QMainWindow):
                 has_other_bank = account.bank and account.bank != account.name
                 title = account.name + (f"  ({account.bank})" if has_other_bank else "")
                 lines = tx.register_lines(session, account_id)
+                last = rec.last_reconciliation(session, account_id)
+                state = rec.reconciliation_state(session, account_id)
             self._title.setText(title)
+            self._has_reconciliation = last is not None
+            self._subtitle.setText(self._reconciliation_text(last, state))
             self._register.set_lines(lines, self._today(), select_transaction_id)
         self._update_actions()
+
+    @staticmethod
+    def _reconciliation_text(
+        last: rec.ReconciliationSummary | None, state: rec.ReconciliationState
+    ) -> str:
+        if last is None:
+            text = "Jamais rapproché"
+        else:
+            text = (
+                f"Rapproché au {last.statement_date.strftime('%d/%m/%Y')} : "
+                f"{format_cents(last.statement_balance_cents)}"
+            )
+        if state.pointed_count:
+            plural = "s" if state.pointed_count > 1 else ""
+            text += f"  •  {state.pointed_count} opération{plural} pointée{plural} en cours"
+        return text
 
     def _on_account_selected(self) -> None:
         self._reload_register()
@@ -351,6 +397,14 @@ class MainWindow(QMainWindow):
         line = self._register.selected_line()
         if line is None:
             return
+        if line.status is ReconciliationStatus.RECONCILED:
+            show_error(
+                self,
+                "Cette opération est rapprochée : elle est figée. Pour la modifier, annulez "
+                "d'abord le dernier rapprochement (menu Rapprochement).",
+                "Opération rapprochée",
+            )
+            return
         # Un compte clôturé n'accepte plus de modification.
         balance = self._accounts.selected_balance()
         if balance is not None and balance.closed:
@@ -391,6 +445,13 @@ class MainWindow(QMainWindow):
         line = self._register.selected_line()
         if line is None:
             return
+        if line.status is ReconciliationStatus.RECONCILED:
+            show_error(
+                self,
+                "Cette opération est rapprochée : elle ne peut pas être supprimée.",
+                "Opération rapprochée",
+            )
+            return
         text = (
             "Supprimer ce virement ? Les deux opérations (sur les deux comptes) seront supprimées."
             if line.is_transfer
@@ -401,6 +462,42 @@ class MainWindow(QMainWindow):
         if self._run_void(lambda session: tx.delete_transaction(session, line.transaction_id)):
             self.refresh(select_account_id=line.account_id)
             self.statusBar().showMessage("Opération supprimée.", 4000)
+
+    # --- Rapprochement --------------------------------------------------------------------
+
+    def _on_reconcile(self) -> None:
+        account_id = self._accounts.selected_account_id()
+        if account_id is None:
+            return
+        dialog = ReconciliationDialog(self._factory, account_id, today=self._today(), parent=self)
+        validated = dialog.exec() == QDialog.DialogCode.Accepted
+        # Même sans validation, des opérations ont pu être pointées : on rafraîchit toujours.
+        self.refresh(select_account_id=account_id)
+        if validated:
+            self.statusBar().showMessage("Rapprochement validé.", 4000)
+
+    def _on_undo_reconcile(self) -> None:
+        account_id = self._accounts.selected_account_id()
+        if account_id is None:
+            return
+        with self._factory() as session:
+            last = rec.last_reconciliation(session, account_id)
+        if last is None:
+            return
+        count = last.transaction_count
+        if not confirm(
+            self,
+            "Annuler le rapprochement",
+            f"Annuler le rapprochement du {last.statement_date.strftime('%d/%m/%Y')} "
+            f"(solde {format_cents(last.statement_balance_cents)}, {count} "
+            f"opération{'s' if count > 1 else ''}) ?\n\n"
+            "Les opérations redeviendront modifiables et non pointées.",
+            "Annuler le rapprochement",
+        ):
+            return
+        if self._run_void(lambda session: rec.undo_last_reconciliation(session, account_id)):
+            self.refresh(select_account_id=account_id)
+            self.statusBar().showMessage("Rapprochement annulé.", 4000)
 
     # --- Divers ---------------------------------------------------------------------------
 
