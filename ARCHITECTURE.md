@@ -78,7 +78,7 @@ Les échéances sont développées entre le rapprochement et le budget.
 | Interface | PySide6 (Qt 6) | Licence LGPL, compatible avec un dépôt MIT. |
 | Base de données | SQLite | Un seul fichier, simple à sauvegarder. |
 | Accès aux données | SQLAlchemy 2.x (ORM) | Style moderne : `Mapped[...]`, `select()`. |
-| Migrations de schéma | Alembic | Introduit à la fin de l'étape 2, avant les données réelles. |
+| Migrations de schéma | Alembic | En place depuis l'étape 2, avant toute donnée réelle. |
 | Gestion du projet | uv | Environnement, dépendances, verrouillage. |
 | Tests | pytest | Base SQLite en mémoire. |
 | Qualité du code | ruff (lint + format) | Un seul outil. Types vérifiés par mypy en mode strict (`uv run mypy`). |
@@ -153,56 +153,71 @@ destinées à l'interface sont de simples `dataclass` immuables.
 - Rien ne lit l'horloge en cachette : les fonctions qui dépendent de la date du jour
   acceptent un paramètre `today`, ce qui rend les tests déterministes.
 
+**Conventions de l'interface** (appliquées depuis l'étape 2) :
+
+- L'interface ouvre une session **courte** par action, avec `unit_of_work(factory)` (validée à
+  la sortie du bloc, annulée sur exception). Elle ne garde jamais d'objets SQLAlchemy : après
+  fermeture de la session ils sont détachés, et lire un attribut expiré lève
+  `DetachedInstanceError`. Elle manipule des identifiants et des `dataclass`
+  (`RegisterLine`, `AccountBalance`, `Choices`).
+- Une `BudgetError` levée par un service est attrapée à un seul endroit (`MainWindow._run`)
+  et affichée dans une boîte de dialogue ; le formulaire a déjà fait les vérifications de
+  saisie, le service fait les vérifications métier.
+- Les boîtes de dialogue (`QDialog`) ne touchent pas à la base : elles renvoient des valeurs
+  (`values()`), et la fenêtre principale appelle les services. Exception : le dialogue des
+  catégories, qui agit directement (chaque bouton valide aussitôt).
+- La date « d'aujourd'hui » est injectée dans `MainWindow(today=...)`, comme pour les services.
+
 ---
 
 ## 4. Arborescence du dépôt
 
 ```
 budget-familial/
-├── pyproject.toml            # métadonnées, dépendances (géré par uv)
-├── uv.lock                   # versions verrouillées (à versionner)
-├── LICENSE                   # MIT
+├── pyproject.toml              # métadonnées, dépendances, ruff, mypy, pytest (géré par uv)
+├── uv.lock                     # versions verrouillées (à versionner)
+├── alembic.ini                 # développement seulement : créer de nouvelles migrations
+├── budget-familial.spec        # construction de l'exécutable (PyInstaller)
+├── LICENSE                     # MIT
 ├── README.md
-├── ARCHITECTURE.md           # ce document
-├── alembic.ini               # ajouté à l'étape 2
-├── migrations/               # scripts de migration Alembic
-├── .github/workflows/        # tests et builds Linux / Windows
+├── ARCHITECTURE.md             # ce document
+├── .github/workflows/ci.yml    # lint, types, tests, exécutables : Linux et Windows
+├── packaging/launcher.py       # script de lancement pour PyInstaller
 ├── src/budget/
-│   ├── __init__.py
-│   ├── __main__.py           # point d'entrée : python -m budget
-│   ├── paths.py              # emplacement des données (pathlib + platformdirs)
+│   ├── __init__.py             # numéro de version
+│   ├── __main__.py             # point d'entrée (option --base FICHIER)
+│   ├── paths.py                # emplacement des données (pathlib + platformdirs)
 │   ├── domain/
-│   │   ├── enums.py          # Frequency, ReconciliationStatus
-│   │   ├── money.py          # centimes <-> "12,50 €"
-│   │   └── recurrence.py     # calcul des dates d'échéance
+│   │   ├── errors.py           # BudgetError, NotFoundError, DuplicateError, InvalidError
+│   │   └── money.py            # centimes <-> "12,50 €"
 │   ├── db/
-│   │   ├── base.py           # DeclarativeBase, moteur, PRAGMA foreign_keys=ON
-│   │   └── models.py         # tables
+│   │   ├── base.py             # moteur, PRAGMA foreign_keys=ON, unit_of_work
+│   │   ├── models.py           # tables
+│   │   ├── migrate.py          # applique les migrations au démarrage
+│   │   └── migrations/         # scripts Alembic (env.py, versions/0001_...)
 │   ├── services/
-│   │   ├── accounts.py
+│   │   ├── accounts.py         # comptes, soldes
 │   │   ├── categories.py
-│   │   ├── transactions.py   # opérations et virements
-│   │   ├── reconciliation.py
-│   │   ├── schedules.py
-│   │   └── budgets.py
+│   │   ├── lookups.py          # tiers, moyens de paiement
+│   │   ├── transactions.py     # opérations, virements, registre
+│   │   └── choices.py          # listes de choix pour les formulaires
 │   └── ui/
-│       ├── app.py            # QApplication, boucle d'événements
-│       ├── main_window.py
-│       ├── account_list.py
-│       ├── register_view.py
-│       ├── transaction_dialog.py
-│       ├── reconciliation_view.py
-│       ├── schedule_view.py
-│       ├── budget_grid.py
-│       └── models/           # sous-classes de QAbstractTableModel
+│       ├── app.py              # QApplication, ouverture de la base, boucle d'événements
+│       ├── i18n.py             # Qt en français
+│       ├── main_window.py      # fenêtre principale, menus, actions
+│       ├── account_list.py     # liste des comptes (QTableView)
+│       ├── register_view.py    # registre d'un compte (QTableView)
+│       ├── models/             # QAbstractTableModel : account_model, register_model
+│       └── dialogs/            # account, transaction, transfer, categories, common
 └── tests/
-    ├── conftest.py           # fixtures : session SQLite en mémoire
-    ├── domain/
-    └── services/
+    ├── conftest.py             # base SQLite en mémoire, comptes d'exemple
+    ├── domain/  db/  services/ # tests sans Qt
+    └── ui/                     # tests Qt (plugin « offscreen »), helpers de dialogues
 ```
 
 L'agencement `src/` empêche d'importer par accident le code non installé et est
-géré nativement par uv.
+géré nativement par uv. Les dossiers `rapprochement`, `échéances` et `budget` s'ajouteront
+dans `services/` et `ui/` aux étapes suivantes.
 
 ---
 
@@ -252,6 +267,31 @@ Trois états, repris de la logique de Grisbi :
   à chaque connexion (dans `db/base.py`).
 - Les dates sont stockées en type `DATE` (SQLAlchemy convertit vers/depuis `datetime.date`).
 - Index à prévoir sur `Transaction(account_id, date)` pour le registre.
+
+### Migrations du schéma (Alembic)
+
+Le schéma est géré par Alembic. L'application applique les migrations toute seule au
+démarrage (`db/migrate.py`) : base neuve = toutes les tables créées ; base existante = seules
+les migrations manquantes, sans toucher aux données.
+
+Pour modifier le schéma (nouvelle colonne, nouvelle table) :
+
+1. Modifier `db/models.py`.
+2. Créer la migration :
+   ```bash
+   rm -f dev.sqlite
+   uv run alembic upgrade head                                   # base de développement à jour
+   uv run alembic revision --autogenerate -m "ajout du pointage"
+   ```
+3. **Relire** le fichier généré dans `db/migrations/versions/` : la détection automatique
+   se trompe parfois (renommages vus comme suppression + création, par exemple).
+4. Lancer les tests : `tests/db/test_migrations.py` échoue si les migrations ne reproduisent
+   pas exactement les modèles.
+
+SQLite sait peu modifier une table existante : Alembic passe par le mode « batch » (il recrée
+la table). Les clés étrangères étant actives sur nos connexions, une migration qui recrée une
+table liée à d'autres demandera un `PRAGMA foreign_keys=OFF` le temps de l'opération (à traiter
+quand le cas se présentera, probablement à l'étape 3).
 
 ---
 
@@ -444,8 +484,11 @@ def data_file() -> Path:
 - `domain` et `services` sont testés exhaustivement : soldes, virements liés,
   rapprochement (écart nul / non nul), génération d'échéances (fins de mois, années
   bissextiles, absence de doublons à la relance), calcul prévu/réalisé.
-- L'interface est testée à la marge (démarrage de la fenêtre, éventuellement
-  `pytest-qt`) : la logique doit rester dans les services pour être testable sans Qt.
+- L'interface est testée avec Qt en mode « offscreen » (sans écran, y compris en CI) :
+  modèles Qt, formulaires, et fenêtre principale de bout en bout. Pour les boîtes de dialogue
+  modales, `tests/ui/helpers.py` fournit `answer_next_dialog`, qui remplit les champs et clique
+  sur les boutons dès que le dialogue s'affiche (le vrai `exec()` est donc exercé). La logique
+  reste dans les services, testée sans Qt.
 - Intégration continue : tests et lint à chaque push, sur Linux et Windows.
 - Un test de non-régression est ajouté pour chaque bogue corrigé.
 
@@ -481,7 +524,16 @@ distributions). Si la fenêtre ne s'ouvre pas, l'erreur le mentionne :
 sudo apt install libxcb-cursor0
 ```
 
-**Packaging** : PyInstaller ne produit pas d'exécutable pour un autre système que celui
+**Lancer l'application sur une base d'essai** (sans toucher à tes vraies données) :
+
+```bash
+uv run budget-familial --base /tmp/essai.sqlite
+```
+
+**Packaging** : `uv run pyinstaller --noconfirm budget-familial.spec` produit le dossier
+`dist/budget-familial/`. Le fichier `.spec` déclare les migrations Alembic comme données :
+ce sont des scripts chargés par chemin, que PyInstaller ne détecte pas tout seul.
+PyInstaller ne produit pas d'exécutable pour un autre système que celui
 sur lequel il tourne. L'exécutable Linux se construit sous Linux, celui de Windows
 sous Windows (en pratique via GitHub Actions).
 
@@ -512,12 +564,16 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 
 **Livrable** : logique métier de base, entièrement testée, sans interface.
 
-### Étape 2 : interface minimale (priorité : saisie)
+### Étape 2 : interface minimale (priorité : saisie) : terminée
 
-- Fenêtre principale, liste des comptes avec soldes.
-- Registre d'un compte : `QTableView` + `QAbstractTableModel`.
-- Formulaire de saisie et de modification (`QDialog`), saisie d'opérations futures.
-- Mise en place d'Alembic (migrations) avant la saisie des données réelles.
+- Fenêtre principale : liste des comptes avec soldes (actuel et prévisionnel) à gauche,
+  registre du compte sélectionné à droite (`QTableView` + `QAbstractTableModel`).
+- Formulaires : compte, opération (dépense ou recette, tiers avec auto-complétion),
+  virement ; modification par double-clic ; suppression avec confirmation.
+- Opérations à venir en gris italique ; virements libellés « depuis / vers » ; comptes clôturés
+  masqués (affichables). Gestion des catégories et sous-catégories.
+- Interface en français (Qt traduit : dates, boutons, menus contextuels).
+- Alembic en place, base créée et migrée au premier lancement.
 
 **Livrable** : première version utilisable au quotidien (comptes + saisie).
 

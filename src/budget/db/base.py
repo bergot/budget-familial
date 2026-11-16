@@ -1,5 +1,7 @@
 """Base déclarative, moteur SQLite et sessions."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from sqlite3 import Connection as SQLiteConnection
 
@@ -44,3 +46,15 @@ def init_schema(engine: Engine) -> None:
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
     """Fabrique de sessions liée au moteur."""
     return sessionmaker(engine)
+
+
+@contextmanager
+def unit_of_work(factory: sessionmaker[Session]) -> Iterator[Session]:
+    """Ouvre une session et une transaction : validée à la sortie, annulée sur exception.
+
+    Usage :
+        with unit_of_work(factory) as session:
+            accounts.create_account(session, "SG")
+    """
+    with factory() as session, session.begin():
+        yield session

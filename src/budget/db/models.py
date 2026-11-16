@@ -92,6 +92,9 @@ class Transaction(Base):
     payee: Mapped[Payee | None] = relationship()
     category: Mapped[Category | None] = relationship()
     payment_method: Mapped[PaymentMethod | None] = relationship()
+    transfer_peer: Mapped[Transaction | None] = relationship(
+        remote_side="Transaction.id", foreign_keys=[transfer_peer_id]
+    )
 
     @property
     def is_transfer(self) -> bool:

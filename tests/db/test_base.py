@@ -29,3 +29,34 @@ def test_file_database_is_created(tmp_path) -> None:
 
 def test_init_schema_can_be_called_twice(engine: Engine) -> None:
     init_schema(engine)  # ne doit pas échouer : les tables existent déjà
+
+
+def test_unit_of_work_commits_on_success(tmp_path) -> None:
+    from budget.db.base import make_session_factory, unit_of_work
+    from budget.services import accounts
+
+    engine = create_db_engine(tmp_path / "b.sqlite")
+    init_schema(engine)
+    factory = make_session_factory(engine)
+
+    with unit_of_work(factory) as session:
+        accounts.create_account(session, "SG")
+
+    with factory() as session:
+        assert [a.name for a in accounts.list_accounts(session)] == ["SG"]
+
+
+def test_unit_of_work_rolls_back_on_error(tmp_path) -> None:
+    from budget.db.base import make_session_factory, unit_of_work
+    from budget.services import accounts
+
+    engine = create_db_engine(tmp_path / "b.sqlite")
+    init_schema(engine)
+    factory = make_session_factory(engine)
+
+    with pytest.raises(RuntimeError), unit_of_work(factory) as session:
+        accounts.create_account(session, "SG")
+        raise RuntimeError("boum")
+
+    with factory() as session:
+        assert accounts.list_accounts(session) == []

@@ -26,6 +26,7 @@ class AccountBalance:
     name: str
     current_cents: int  # opérations datées d'aujourd'hui ou avant
     forecast_cents: int  # toutes les opérations, y compris futures
+    closed: bool = False
 
 
 def _name_taken(session: Session, name: str, *, except_id: int | None = None) -> bool:
@@ -138,6 +139,7 @@ def account_balances(
             + _sum_amounts(session, account.id, up_to=today),
             forecast_cents=account.initial_balance_cents
             + _sum_amounts(session, account.id, up_to=None),
+            closed=account.closed,
         )
         for account in list_accounts(session, include_closed=include_closed)
     ]

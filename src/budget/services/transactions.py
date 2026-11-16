@@ -9,7 +9,7 @@ import datetime as dt
 from dataclasses import dataclass
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from budget.db.models import Account, Category, Payee, PaymentMethod, Transaction
 from budget.domain.errors import InvalidError
@@ -39,6 +39,33 @@ class TransferData:
     amount_cents: int  # strictement positif
     payment_method_id: int | None = None
     notes: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterLine:
+    """Une ligne du registre sous forme de valeurs simples, prête pour l'interface.
+
+    Contrairement à `RegisterRow`, elle ne contient aucun objet SQLAlchemy : on peut la
+    garder après la fermeture de la session sans risquer d'erreur de chargement tardif.
+    """
+
+    transaction_id: int
+    account_id: int
+    date: dt.date
+    amount_cents: int  # signé
+    balance_cents: int  # solde du compte juste après cette opération
+    payee_name: str
+    category_id: int | None
+    category_name: str
+    payment_method_id: int | None
+    payment_method_name: str
+    notes: str
+    transfer_account_id: int | None  # autre compte du virement, sinon None
+    transfer_account_name: str
+
+    @property
+    def is_transfer(self) -> bool:
+        return self.transfer_account_id is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,9 +173,14 @@ def delete_transaction(session: Session, transaction_id: int) -> None:
         if transaction.transfer_peer_id is not None
         else None
     )
-    session.delete(transaction)
     if peer is not None:
+        # Les deux moitiés se désignent mutuellement : l'ORM ne sait pas laquelle supprimer
+        # en premier (dépendance circulaire). On défait donc d'abord le lien.
+        transaction.transfer_peer_id = None
+        peer.transfer_peer_id = None
+        session.flush()
         session.delete(peer)
+    session.delete(transaction)
     session.flush()
 
 
@@ -220,7 +252,17 @@ def list_transactions(
 ) -> list[Transaction]:
     """Opérations d'un compte, de la plus ancienne à la plus récente."""
     require(session, Account, account_id, "Compte")
-    stmt = select(Transaction).where(Transaction.account_id == account_id)
+    stmt = (
+        select(Transaction)
+        .where(Transaction.account_id == account_id)
+        # Charge les éléments liés en quelques requêtes groupées, plutôt qu'une par ligne.
+        .options(
+            selectinload(Transaction.payee),
+            selectinload(Transaction.category).selectinload(Category.parent),
+            selectinload(Transaction.payment_method),
+            selectinload(Transaction.transfer_peer).selectinload(Transaction.account),
+        )
+    )
     if date_from is not None:
         stmt = stmt.where(Transaction.date >= date_from)
     if date_to is not None:
@@ -238,3 +280,29 @@ def register(session: Session, account_id: int) -> list[RegisterRow]:
         balance += transaction.amount_cents
         rows.append(RegisterRow(transaction=transaction, balance_cents=balance))
     return rows
+
+
+def register_lines(session: Session, account_id: int) -> list[RegisterLine]:
+    """Registre d'un compte sous forme de `RegisterLine` (pour l'interface)."""
+    lines: list[RegisterLine] = []
+    for row in register(session, account_id):
+        t = row.transaction
+        peer_account = t.transfer_peer.account if t.transfer_peer is not None else None
+        lines.append(
+            RegisterLine(
+                transaction_id=t.id,
+                account_id=t.account_id,
+                date=t.date,
+                amount_cents=t.amount_cents,
+                balance_cents=row.balance_cents,
+                payee_name=t.payee.name if t.payee else "",
+                category_id=t.category_id,
+                category_name=t.category.full_name if t.category else "",
+                payment_method_id=t.payment_method_id,
+                payment_method_name=t.payment_method.name if t.payment_method else "",
+                notes=t.notes,
+                transfer_account_id=peer_account.id if peer_account else None,
+                transfer_account_name=peer_account.name if peer_account else "",
+            )
+        )
+    return lines
