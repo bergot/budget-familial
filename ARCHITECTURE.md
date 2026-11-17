@@ -189,6 +189,7 @@ budget-familial/
 │   ├── paths.py                # emplacement des données (pathlib + platformdirs)
 │   ├── domain/
 │   │   ├── enums.py            # ReconciliationStatus (none / pointed / reconciled)
+│   │   ├── recurrence.py       # dates des échéances (fins de mois, sans dérive)
 │   │   ├── errors.py           # BudgetError, NotFoundError, DuplicateError, InvalidError
 │   │   └── money.py            # centimes <-> "12,50 €"
 │   ├── db/
@@ -202,15 +203,16 @@ budget-familial/
 │   │   ├── lookups.py          # tiers, moyens de paiement
 │   │   ├── transactions.py     # opérations, virements, registre
 │   │   ├── reconciliation.py   # pointage, écart, validation, annulation
+│   │   ├── schedules.py        # échéances et génération des opérations
 │   │   └── choices.py          # listes de choix pour les formulaires
 │   └── ui/
-│       ├── app.py              # QApplication, ouverture de la base, boucle d'événements
+│       ├── app.py              # open_database (migrations, échéances), QApplication, boucle
 │       ├── i18n.py             # Qt en français
 │       ├── main_window.py      # fenêtre principale, menus, actions
 │       ├── account_list.py     # liste des comptes (QTableView)
 │       ├── register_view.py    # registre d'un compte (QTableView)
-│       ├── models/             # QAbstractTableModel : account, register, pointing
-│       └── dialogs/            # account, transaction, transfer, categories, reconciliation
+│       ├── models/             # QAbstractTableModel : account, register, pointing, schedule
+│       └── dialogs/            # account, transaction, transfer, categories, reconciliation, schedules
 └── tests/
     ├── conftest.py             # base SQLite en mémoire, comptes d'exemple
     ├── domain/  db/  services/ # tests sans Qt
@@ -218,7 +220,7 @@ budget-familial/
 ```
 
 L'agencement `src/` empêche d'importer par accident le code non installé et est
-géré nativement par uv. Les échéances et le budget s'ajouteront dans `services/` et `ui/` aux étapes suivantes.
+géré nativement par uv. Le budget s'ajoutera dans `services/` et `ui/` à l'étape suivante.
 
 ---
 
@@ -232,7 +234,7 @@ géré nativement par uv. Les échéances et le budget s'ajouteront dans `servic
 | `PaymentMethod` | `id`, `name` | `name` unique |
 | `Transaction` | `id`, `account_id`, `date`, `payee_id`, `amount_cents` (signé), `category_id`, `payment_method_id`, `notes`, `status`, `reconciliation_id`, `transfer_peer_id`, `schedule_id` | Clés étrangères ; `transfer_peer_id` auto-référence |
 | `Reconciliation` | `id`, `account_id`, `statement_date`, `statement_balance_cents` | |
-| `Schedule` | `id`, `account_id`, `payee_id`, `amount_cents`, `category_id`, `payment_method_id`, `notes`, `frequency`, `start_date`, `end_date` (nullable), `last_generated_date`, `transfer_account_id` (nullable) | `transfer_account_id` renseigné pour un virement planifié |
+| `Schedule` | `id`, `account_id`, `payee_id`, `amount_cents`, `category_id`, `payment_method_id`, `notes`, `frequency`, `start_date`, `end_date` (nullable), `generated_count`, `transfer_account_id` (nullable) | `transfer_account_id` renseigné pour un virement planifié ; `generated_count` = occurrences déjà générées |
 | `BudgetLine` | `id`, `category_id`, `year`, `month`, `planned_cents` | Unique sur (`category_id`, `year`, `month`) |
 
 ### Mise en œuvre par étapes
@@ -243,7 +245,7 @@ Les tables sont créées au fil des étapes, chacune avec sa migration Alembic.
 |---|---|---|
 | 1 | `Account`, `Category`, `Payee`, `PaymentMethod`, `Transaction` | `0001` |
 | 3 | `Reconciliation` ; `Transaction.status` et `Transaction.reconciliation_id` | `0002` |
-| 4 | `Schedule` ; `Transaction.schedule_id` | à venir |
+| 4 | `Schedule` ; `Transaction.schedule_id` | `0003` |
 | 5 | `BudgetLine` | à venir |
 
 Les tables portent des noms pluriels en base (`accounts`, `transactions`...). Dans le code,
@@ -353,14 +355,40 @@ Règles associées :
 
 ### Échéances
 
-- Fréquences : mensuelle, trimestrielle, annuelle.
-- Au lancement de l'application, le service génère les opérations dues jusqu'à un
-  horizon configurable (quelques mois), à partir de `last_generated_date`.
-- Cas limite : une échéance fixée au 31 doit se replier sur le dernier jour des mois
-  plus courts, sans dériver (le 31 janvier donne le 28 février, puis le 31 mars).
-- Les opérations générées sont indépendantes : on peut les modifier ou les supprimer
-  sans toucher à l'échéance.
-- Une échéance peut être un virement (compte de destination renseigné).
+Une échéance (`Schedule`) est un modèle d'opération ou de virement avec un rythme
+(mensuelle, trimestrielle, annuelle), une date de début et une date de fin facultative.
+
+**Dates.** La n-ième occurrence se calcule directement à partir de la date de début
+(`domain/recurrence.py`), jamais à partir de la précédente : une échéance au 31 donne le
+31 janvier, le 28 février, puis **de nouveau le 31 mars** (pas de dérive). Un 29 février annuel
+se replie sur le 28 les années non bissextiles et revient le 29 les bissextiles.
+
+**Génération.** Au lancement, `generate_due_transactions` crée les opérations jusqu'à un
+horizon (3 mois par défaut, paramètre `horizon_months`), pour qu'elles apparaissent dans
+le solde prévisionnel.
+
+- **Pas de doublon** : le compteur `generated_count` avance dans la même transaction que la
+  création des opérations ; relancer la génération ne recrée rien.
+- **Rattrapage** : si l'application n'a pas été ouverte pendant des mois, toutes les occurrences
+  manquantes sont créées. Une date de début passée provoque de même la création immédiate des
+  occurrences passées (le formulaire le signale).
+- **Indépendance** : une opération générée est une opération comme une autre (`schedule_id` ne
+  garde que son origine). La modifier ou la supprimer ne touche pas l'échéance, et une
+  opération supprimée n'est jamais recréée.
+- **Virement planifié** : crée les deux moitiés liées, chacune avec `schedule_id` (cas du
+  crédit mensuel SG vers Boursorama). Le montant est positif, le sens est « compte -> destination ».
+- **Échéance impossible à générer** (compte clôturé par exemple) : ignorée et signalée à
+  l'utilisateur, sans bloquer les autres ni perdre d'occurrence ; reprise automatiquement
+  quand la cause disparaît.
+
+**Modification.** Changer le modèle (montant, tiers, catégorie...) n'affecte que les opérations
+futures ; celles déjà générées ne bougent pas. Une fois des opérations générées, la date de début
+et la fréquence sont **verrouillées** (le décompte des occurrences deviendrait incohérent) :
+pour changer de rythme, on termine l'échéance par une date de fin et on en crée une nouvelle.
+
+**Suppression.** Supprimer une échéance conserve les opérations déjà générées (leur
+`schedule_id` passe à NULL). Un compte ou une catégorie utilisés par une échéance ne peuvent pas
+être supprimés.
 
 ### Budget
 
@@ -625,11 +653,15 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 
 **Livrable** : rapprochement bancaire fonctionnel sur les deux banques.
 
-### Étape 4 : échéances
+### Étape 4 : échéances : terminée
 
-- Modèle `Schedule`, module `domain/recurrence.py` (dates, fins de mois).
-- Génération automatique au lancement, sans doublons.
-- Écran de gestion des échéances, y compris le virement mensuel SG → Boursorama.
+- Table `Schedule` et lien `Transaction.schedule_id` (migration `0003`, testée sur une base
+  peuplée : virements et rapprochements intacts).
+- `domain/recurrence.py` : dates mensuelles, trimestrielles, annuelles, fins de mois sans dérive.
+- Service : création et modification d'échéances, génération sans doublon avec rattrapage,
+  échéances ignorées signalées.
+- Écran de gestion des échéances ; génération au lancement (`open_database`) ; virement
+  mensuel SG vers Boursorama pris en charge ; origine visible dans le registre (infobulle).
 
 **Livrable** : opérations récurrentes créées automatiquement.
 
@@ -666,5 +698,5 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 | Qt débutant | Courbe d'apprentissage du modèle/vue | Interface minimale d'abord ; logique isolée dans les services |
 | Schéma de données | Évolutions une fois les données réelles saisies | Alembic dès la fin de l'étape 2 |
 | Budget parent/enfant | Somme des sous-catégories ou saisie indépendante | À trancher à l'étape 5 |
-| Horizon des échéances | Durée de génération à l'avance | Paramètre configurable, valeur par défaut de quelques mois |
+| Horizon des échéances | Durée de génération à l'avance | Paramètre `horizon_months` du service (3 mois) ; réglage dans l'interface à envisager à l'étape 6 |
 | Sauvegarde | Perte du fichier de données | Sauvegardes automatiques à l'étape 6 ; d'ici là, copie manuelle |

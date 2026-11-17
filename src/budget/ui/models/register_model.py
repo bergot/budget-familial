@@ -116,8 +116,11 @@ class RegisterTableModel(QAbstractTableModel):
             if column == COL_STATUS:
                 return int(Qt.AlignmentFlag.AlignCenter)
 
-        if role == Qt.ItemDataRole.ToolTipRole and column == COL_STATUS:
-            return _STATUS_TIP[line.status] or None
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if column == COL_STATUS:
+                return _STATUS_TIP[line.status] or None
+            if column == COL_DATE and line.schedule_id is not None:
+                return "Opération générée par une échéance"
 
         is_future = line.date > self._today
         if role == Qt.ItemDataRole.ForegroundRole:

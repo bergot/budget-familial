@@ -3,7 +3,7 @@
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from budget.db.models import Category, Transaction
+from budget.db.models import Category, Schedule, Transaction
 from budget.domain.errors import DuplicateError, InvalidError
 from budget.services._common import clean_name, require
 
@@ -75,5 +75,10 @@ def delete_category(session: Session, category_id: int) -> None:
     )
     if used is not None:
         raise InvalidError(f"« {category.full_name} » est utilisée par des opérations")
+    used_by_schedule = session.scalar(
+        select(Schedule.id).where(Schedule.category_id == category_id).limit(1)
+    )
+    if used_by_schedule is not None:
+        raise InvalidError(f"« {category.full_name} » est utilisée par des échéances")
     session.delete(category)
     session.flush()

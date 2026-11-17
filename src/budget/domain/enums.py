@@ -13,3 +13,29 @@ class ReconciliationStatus(StrEnum):
     NONE = "none"  # pas encore vue sur un relevé
     POINTED = "pointed"  # cochée pendant un rapprochement en cours
     RECONCILED = "reconciled"  # rapprochement validé : l'opération est figée
+
+
+class Frequency(StrEnum):
+    """Fréquence d'une échéance."""
+
+    MONTHLY = "monthly"
+    QUARTERLY = "quarterly"
+    YEARLY = "yearly"
+
+    @property
+    def label(self) -> str:
+        """Libellé français affiché dans l'interface."""
+        return _FREQUENCY_LABELS[self]
+
+    @property
+    def months(self) -> int:
+        """Nombre de mois entre deux occurrences."""
+        return _FREQUENCY_MONTHS[self]
+
+
+_FREQUENCY_LABELS = {
+    Frequency.MONTHLY: "Mensuelle",
+    Frequency.QUARTERLY: "Trimestrielle",
+    Frequency.YEARLY: "Annuelle",
+}
+_FREQUENCY_MONTHS = {Frequency.MONTHLY: 1, Frequency.QUARTERLY: 3, Frequency.YEARLY: 12}

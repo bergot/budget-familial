@@ -122,7 +122,9 @@ def test_backup_is_made_before_migrating_an_existing_database(tmp_path: Path) ->
     _insert_version_1_data(engine)
     assert list(tmp_path.glob("*.bak")) == []  # base neuve : rien à sauvegarder
 
-    upgrade_to_head(engine)
+    upgrade_to_head(
+        engine, revision="0002"
+    )  # une version précise : le test ne dépend pas des suivantes
 
     (backup,) = tmp_path.glob("*.bak")
     assert backup.name == "budget.sqlite.avant-0002.bak"
@@ -144,3 +146,44 @@ def test_foreign_keys_are_off_only_during_the_migration(tmp_path: Path) -> None:
     upgrade_to_head(engine)
     with engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+
+def test_upgrade_from_version_2_keeps_transfers_and_reconciliations(tmp_path: Path) -> None:
+    """0002 -> 0003 sur une base peuplée : virements liés et rapprochements intacts."""
+    engine = create_db_engine(tmp_path / "budget.sqlite")
+    upgrade_to_head(engine, revision="0002")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO accounts (id, name, bank, initial_balance_cents, closed) VALUES "
+            "(1, 'SG', NULL, 100000, 0), (2, 'Boursorama', NULL, 0, 0)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO reconciliations (id, account_id, statement_date, statement_balance_cents) "
+            "VALUES (1, 1, '2026-03-31', 70000)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO transactions (id, account_id, date, amount_cents, notes, status, "
+            "reconciliation_id) VALUES "
+            "(1, 1, '2026-03-02', -30000, '', 'reconciled', 1), "
+            "(2, 2, '2026-03-02', 30000, '', 'pointed', NULL), "
+            "(3, 1, '2026-04-01', -500, 'x', 'none', NULL)"
+        )
+        connection.exec_driver_sql("UPDATE transactions SET transfer_peer_id = 2 WHERE id = 1")
+        connection.exec_driver_sql("UPDATE transactions SET transfer_peer_id = 1 WHERE id = 2")
+
+    upgrade_to_head(engine)
+
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT id, transfer_peer_id, status, reconciliation_id, schedule_id "
+            "FROM transactions ORDER BY id"
+        ).fetchall()
+        assert rows == [
+            (1, 2, "reconciled", 1, None),  # virement et rapprochement conservés
+            (2, 1, "pointed", None, None),
+            (3, None, "none", None, None),
+        ]
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.exec_driver_sql("SELECT count(*) FROM schedules").scalar() == 0
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+    assert differences == []

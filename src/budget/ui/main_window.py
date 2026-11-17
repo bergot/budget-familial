@@ -23,6 +23,7 @@ from budget.domain.errors import BudgetError
 from budget.domain.money import format_cents
 from budget.services import accounts, lookups
 from budget.services import reconciliation as rec
+from budget.services import schedules as sch
 from budget.services import transactions as tx
 from budget.services.choices import load_choices
 from budget.services.transactions import RegisterLine, TransactionData
@@ -31,6 +32,7 @@ from budget.ui.dialogs.account_dialog import AccountDialog, AccountInput
 from budget.ui.dialogs.categories_dialog import CategoriesDialog
 from budget.ui.dialogs.common import confirm, show_error
 from budget.ui.dialogs.reconciliation_dialog import ReconciliationDialog
+from budget.ui.dialogs.schedules_dialog import SchedulesDialog
 from budget.ui.dialogs.transaction_dialog import TransactionDialog, TransactionInput
 from budget.ui.dialogs.transfer_dialog import TransferDialog
 from budget.ui.register_view import RegisterView
@@ -128,6 +130,8 @@ class MainWindow(QMainWindow):
             "&Annuler le dernier rapprochement…", self._on_undo_reconcile
         )
 
+        self.act_schedules = self._make_action("&Gérer les échéances…", self._on_schedules)
+
         self.act_categories = self._make_action("&Catégories…", self._on_categories)
         self.act_about = self._make_action("À &propos", self._on_about)
 
@@ -154,6 +158,9 @@ class MainWindow(QMainWindow):
         reconcile_menu = bar.addMenu("&Rapprochement")
         reconcile_menu.addAction(self.act_reconcile)
         reconcile_menu.addAction(self.act_undo_reconcile)
+
+        schedule_menu = bar.addMenu("&Échéances")
+        schedule_menu.addAction(self.act_schedules)
 
         settings_menu = bar.addMenu("&Données")
         settings_menu.addAction(self.act_categories)
@@ -498,6 +505,28 @@ class MainWindow(QMainWindow):
         if self._run_void(lambda session: rec.undo_last_reconciliation(session, account_id)):
             self.refresh(select_account_id=account_id)
             self.statusBar().showMessage("Rapprochement annulé.", 4000)
+
+    # --- Échéances ------------------------------------------------------------------------
+
+    def report_generation(self, result: sch.GenerationResult) -> None:
+        """Informe l'utilisateur du résultat de la génération des échéances (au démarrage)."""
+        if result.created:
+            plural = "s" if result.created > 1 else ""
+            self.statusBar().showMessage(
+                f"{result.created} opération{plural} créée{plural} par les échéances.", 8000
+            )
+        if result.skipped:
+            details = "\n".join(f"• {s.description} : {s.reason}" for s in result.skipped)
+            show_error(
+                self,
+                "Certaines échéances n'ont pas pu être générées :\n\n"
+                f"{details}\n\nElles seront reprises dès que le problème sera réglé.",
+                "Échéances ignorées",
+            )
+
+    def _on_schedules(self) -> None:
+        SchedulesDialog(self._factory, today=self._today(), parent=self).exec()
+        self.refresh()  # des opérations ont pu être générées
 
     # --- Divers ---------------------------------------------------------------------------
 

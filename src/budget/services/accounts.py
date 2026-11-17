@@ -10,10 +10,10 @@ transaction : tout est validé, ou rien.
 import datetime as dt
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from budget.db.models import Account, Transaction
+from budget.db.models import Account, Schedule, Transaction
 from budget.domain.errors import DuplicateError, InvalidError
 from budget.services._common import clean_name, require
 
@@ -96,6 +96,16 @@ def delete_account(session: Session, account_id: int) -> None:
         raise InvalidError(
             f"Le compte « {account.name} » contient des opérations : "
             "clôturez-le plutôt que de le supprimer"
+        )
+    has_schedules = session.scalar(
+        select(Schedule.id)
+        .where(or_(Schedule.account_id == account_id, Schedule.transfer_account_id == account_id))
+        .limit(1)
+    )
+    if has_schedules is not None:
+        raise InvalidError(
+            f"Le compte « {account.name} » est utilisé par des échéances : "
+            "supprimez-les d'abord, ou clôturez le compte"
         )
     session.delete(account)
     session.flush()

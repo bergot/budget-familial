@@ -28,6 +28,7 @@ class TransactionData:
     category_id: int | None = None
     payment_method_id: int | None = None
     notes: str = ""
+    schedule_id: int | None = None  # renseigné par la génération des échéances
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ class TransferData:
     amount_cents: int  # strictement positif
     payment_method_id: int | None = None
     notes: str = ""
+    schedule_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +66,7 @@ class RegisterLine:
     transfer_account_id: int | None  # autre compte du virement, sinon None
     transfer_account_name: str
     status: ReconciliationStatus = ReconciliationStatus.NONE
+    schedule_id: int | None = None  # échéance d'origine, si l'opération a été générée
 
     @property
     def is_transfer(self) -> bool:
@@ -160,6 +163,7 @@ def add_transaction(session: Session, data: TransactionData) -> Transaction:
         category_id=data.category_id,
         payment_method_id=data.payment_method_id,
         notes=data.notes,
+        schedule_id=data.schedule_id,
     )
     session.add(transaction)
     session.flush()
@@ -216,6 +220,7 @@ def create_transfer(session: Session, data: TransferData) -> tuple[Transaction, 
         amount_cents=-data.amount_cents,
         payment_method_id=data.payment_method_id,
         notes=data.notes,
+        schedule_id=data.schedule_id,
     )
     incoming = Transaction(
         account_id=data.to_account_id,
@@ -223,6 +228,7 @@ def create_transfer(session: Session, data: TransferData) -> tuple[Transaction, 
         amount_cents=data.amount_cents,
         payment_method_id=data.payment_method_id,
         notes=data.notes,
+        schedule_id=data.schedule_id,
     )
     session.add_all([outgoing, incoming])
     session.flush()  # les deux opérations reçoivent leur identifiant...
@@ -325,6 +331,7 @@ def register_lines(session: Session, account_id: int) -> list[RegisterLine]:
                 transfer_account_id=peer_account.id if peer_account else None,
                 transfer_account_name=peer_account.name if peer_account else "",
                 status=t.status,
+                schedule_id=t.schedule_id,
             )
         )
     return lines

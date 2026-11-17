@@ -8,12 +8,24 @@ Conventions :
 """
 
 import datetime as dt
+from enum import StrEnum
 
 from sqlalchemy import Enum, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from budget.db.base import Base
-from budget.domain.enums import ReconciliationStatus
+from budget.domain.enums import Frequency, ReconciliationStatus
+
+
+def enum_column[E: StrEnum](enum_class: type[E]) -> Enum:
+    """Colonne énumérée : SQLite n'a pas de type énuméré, on stocke la valeur comme du texte."""
+    return Enum(
+        enum_class,
+        native_enum=False,
+        length=20,
+        # On stocke « pointed » (la valeur) plutôt que « POINTED » (le nom du membre).
+        values_callable=lambda members: [member.value for member in members],
+    )
 
 
 class Account(Base):
@@ -83,6 +95,45 @@ class Reconciliation(Base):
     statement_balance_cents: Mapped[int]
 
 
+class Schedule(Base):
+    """Échéance récurrente : un modèle d'opération (ou de virement) et son rythme.
+
+    Les opérations sont générées jusqu'à un horizon (voir `services/schedules.py`). Le
+    compteur `generated_count` est le nombre d'occurrences déjà générées : la prochaine à
+    produire est l'occurrence n° `generated_count` (0 = la date de début). Ce compteur évite
+    tout doublon, et une opération générée puis supprimée n'est jamais recréée.
+    """
+
+    __tablename__ = "schedules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    amount_cents: Mapped[
+        int
+    ]  # opération : signé ; virement : positif (sens = compte -> destination)
+    frequency: Mapped[Frequency] = mapped_column(enum_column(Frequency))
+    start_date: Mapped[dt.date]
+    end_date: Mapped[dt.date | None]
+    generated_count: Mapped[int] = mapped_column(default=0, server_default="0")
+    payee_id: Mapped[int | None] = mapped_column(ForeignKey("payees.id"))
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"))
+    payment_method_id: Mapped[int | None] = mapped_column(ForeignKey("payment_methods.id"))
+    notes: Mapped[str] = mapped_column(default="")
+    # Renseigné pour un virement planifié : le compte qui reçoit.
+    transfer_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"))
+
+    # Deux clés étrangères vers `accounts` : il faut dire à SQLAlchemy laquelle utiliser.
+    account: Mapped[Account] = relationship(foreign_keys=[account_id])
+    transfer_account: Mapped[Account | None] = relationship(foreign_keys=[transfer_account_id])
+    payee: Mapped[Payee | None] = relationship()
+    category: Mapped[Category | None] = relationship()
+    payment_method: Mapped[PaymentMethod | None] = relationship()
+
+    @property
+    def is_transfer(self) -> bool:
+        return self.transfer_account_id is not None
+
+
 class Transaction(Base):
     __tablename__ = "transactions"
     __table_args__ = (Index("ix_transactions_account_date", "account_id", "date"),)
@@ -96,18 +147,17 @@ class Transaction(Base):
     payment_method_id: Mapped[int | None] = mapped_column(ForeignKey("payment_methods.id"))
     notes: Mapped[str] = mapped_column(default="")
     status: Mapped[ReconciliationStatus] = mapped_column(
-        Enum(
-            ReconciliationStatus,
-            native_enum=False,  # SQLite n'a pas de type énuméré : stocké comme du texte
-            length=20,
-            # On stocke « pointed » (la valeur) plutôt que « POINTED » (le nom du membre).
-            values_callable=lambda members: [member.value for member in members],
-        ),
+        enum_column(ReconciliationStatus),
         default=ReconciliationStatus.NONE,
         server_default=ReconciliationStatus.NONE.value,
     )
     reconciliation_id: Mapped[int | None] = mapped_column(
         ForeignKey("reconciliations.id", name="fk_transactions_reconciliation_id")
+    )
+    # Échéance qui a généré cette opération (None si saisie à la main). Supprimer l'échéance
+    # conserve les opérations déjà générées : elles perdent simplement ce lien.
+    schedule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("schedules.id", name="fk_transactions_schedule_id", ondelete="SET NULL")
     )
     # Pour un virement : l'autre moitié du couple d'opérations liées.
     transfer_peer_id: Mapped[int | None] = mapped_column(
