@@ -553,6 +553,15 @@ def data_file() -> Path:
   modales, `tests/ui/helpers.py` fournit `answer_next_dialog`, qui remplit les champs et clique
   sur les boutons dès que le dialogue s'affiche (le vrai `exec()` est donc exercé). La logique
   reste dans les services, testée sans Qt.
+- **Hygiène des tests Qt** (`tests/ui/conftest.py`, `helpers.py`) : après chaque test, toutes
+  les fenêtres sont fermées et détruites. Sans cela, elles survivent jusqu'à la sortie de Python,
+  PySide détruit l'application Qt avant elles et le processus **plante en sortie** (segfault ou
+  corruption de mémoire) : tous les tests passent mais le code de retour est non nul, donc la CI
+  est rouge, de façon intermittente (l'ordre de destruction dépend de la graine de hachage).
+  Les réponses de dialogue sont aussi surveillées : une assertion qui échoue dans l'une d'elles,
+  ou une réponse jamais jouée, fait échouer le test (Qt se contenterait d'afficher l'exception).
+  Quand plusieurs dialogues sont imbriqués, la réponse va au plus profond.
+  Pour vérifier la stabilité : `for s in 1 2 3 4 5 6; do PYTHONHASHSEED=$s uv run pytest -q; echo $?; done`.
 - Intégration continue : tests et lint à chaque push, sur Linux et Windows.
 - Un test de non-régression est ajouté pour chaque bogue corrigé.
 

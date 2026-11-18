@@ -9,6 +9,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
@@ -41,8 +42,23 @@ def factory(tmp_path: Path) -> Iterator[sessionmaker]:  # type: ignore[type-arg]
 
 
 @pytest.fixture(autouse=True)
-def _stop_watchdogs() -> Iterator[None]:
-    yield
-    from tests.ui.helpers import stop_watchdogs
+def _ui_hygiene(qapp: QApplication) -> Iterator[None]:
+    """Après chaque test : détruit les fenêtres, et fait échouer le test si une réponse a échoué.
 
-    stop_watchdogs()
+    Sans ce nettoyage, des fenêtres survivent jusqu'à la fin du processus : PySide détruit alors
+    l'application Qt avant elles et le processus plante en sortie (segfault ou corruption de
+    mémoire, selon l'ordre de destruction). Tous les tests passent, mais le code de retour est
+    non nul, et la CI devient rouge.
+    """
+    yield
+    from tests.ui.helpers import finish_test
+
+    problems = finish_test()
+    for widget in QApplication.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    # Les `deleteLater` ne sont exécutés que par la boucle d'événements : on la sollicite.
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qapp.processEvents()
+    if problems:
+        pytest.fail("Réponses de dialogue en échec :\n- " + "\n- ".join(problems), pytrace=False)
