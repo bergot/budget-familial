@@ -29,6 +29,7 @@ from budget.services.choices import load_choices
 from budget.services.transactions import RegisterLine, TransactionData
 from budget.ui.account_list import AccountList
 from budget.ui.dialogs.account_dialog import AccountDialog, AccountInput
+from budget.ui.dialogs.budget_dialog import BudgetDialog
 from budget.ui.dialogs.categories_dialog import CategoriesDialog
 from budget.ui.dialogs.common import confirm, show_error
 from budget.ui.dialogs.reconciliation_dialog import ReconciliationDialog
@@ -131,6 +132,7 @@ class MainWindow(QMainWindow):
         )
 
         self.act_schedules = self._make_action("&Gérer les échéances…", self._on_schedules)
+        self.act_budget = self._make_action("&Ouvrir le budget…", self._on_budget, "Ctrl+B")
 
         self.act_categories = self._make_action("&Catégories…", self._on_categories)
         self.act_about = self._make_action("À &propos", self._on_about)
@@ -162,6 +164,9 @@ class MainWindow(QMainWindow):
         schedule_menu = bar.addMenu("&Échéances")
         schedule_menu.addAction(self.act_schedules)
 
+        budget_menu = bar.addMenu("&Budget")
+        budget_menu.addAction(self.act_budget)
+
         settings_menu = bar.addMenu("&Données")
         settings_menu.addAction(self.act_categories)
 
@@ -176,6 +181,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.act_delete_transaction)
         toolbar.addSeparator()
         toolbar.addAction(self.act_reconcile)
+        toolbar.addAction(self.act_budget)
 
     def _update_actions(self) -> None:
         balance = self._accounts.selected_balance()
@@ -527,6 +533,11 @@ class MainWindow(QMainWindow):
     def _on_schedules(self) -> None:
         SchedulesDialog(self._factory, today=self._today(), parent=self).exec()
         self.refresh()  # des opérations ont pu être générées
+
+    # --- Budget ---------------------------------------------------------------------------
+
+    def _on_budget(self) -> None:
+        BudgetDialog(self._factory, today=self._today(), parent=self).exec()
 
     # --- Divers ---------------------------------------------------------------------------
 

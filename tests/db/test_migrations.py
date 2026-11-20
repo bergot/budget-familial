@@ -187,3 +187,73 @@ def test_upgrade_from_version_2_keeps_transfers_and_reconciliations(tmp_path: Pa
         assert connection.exec_driver_sql("SELECT count(*) FROM schedules").scalar() == 0
         differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
     assert differences == []
+
+
+def test_upgrade_from_version_3_infers_category_kinds_and_keeps_data(tmp_path: Path) -> None:
+    """0003 -> 0004 : les catégories utilisées en recette deviennent des recettes."""
+    engine = create_db_engine(tmp_path / "budget.sqlite")
+    upgrade_to_head(engine, revision="0003")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO accounts (id, name, bank, initial_balance_cents, closed) VALUES "
+            "(1, 'SG', NULL, 0, 0), (2, 'Bourso', NULL, 0, 0)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO categories (id, name, parent_id) VALUES "
+            "(1, 'Revenus', NULL), (2, 'Salaire', 1), "  # recette (via la sous-catégorie)
+            "(3, 'Alimentation', NULL), (4, 'Courses', 3), "  # dépense
+            "(5, 'Divers', NULL), "  # jamais utilisée : dépense par défaut
+            "(6, 'Remboursements', NULL)"  # net positif : recette
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO transactions "
+            "(id, account_id, date, amount_cents, category_id, notes, status) "
+            "VALUES (1, 1, '2026-03-01', 250000, 2, '', 'none'), "
+            "(2, 1, '2026-03-02', -4200, 4, '', 'none'), "
+            "(3, 1, '2026-03-03', -1000, 3, '', 'none'), "
+            "(4, 1, '2026-03-04', 5000, 6, '', 'none'), "
+            "(5, 1, '2026-03-05', -9000, 6, '', 'none'), "  # Remboursements : net -40 => dépense
+            "(6, 1, '2026-03-06', 20000, 6, '', 'none'), "
+            "(7, 1, '2026-03-07', -50000, NULL, '', 'none'), "  # un virement : ignoré
+            "(8, 2, '2026-03-07', 50000, NULL, '', 'none')"
+        )
+        connection.exec_driver_sql("UPDATE transactions SET transfer_peer_id = 8 WHERE id = 7")
+        connection.exec_driver_sql("UPDATE transactions SET transfer_peer_id = 7 WHERE id = 8")
+
+    upgrade_to_head(engine)
+
+    with engine.connect() as connection:
+        kinds = dict(connection.exec_driver_sql("SELECT id, kind FROM categories").fetchall())
+        assert kinds == {
+            1: "income",
+            2: "income",  # la sous-catégorie suit sa catégorie
+            3: "expense",
+            4: "expense",
+            5: "expense",
+            6: "income",  # +50 - 90 + 200 = +160 : net positif
+        }
+        pairs = connection.exec_driver_sql(
+            "SELECT id, transfer_peer_id FROM transactions WHERE id IN (7, 8) ORDER BY id"
+        ).fetchall()
+        assert pairs == [(7, 8), (8, 7)]  # le virement est intact
+        assert connection.exec_driver_sql("SELECT count(*) FROM budget_lines").scalar() == 0
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+    assert differences == []
+
+
+def test_downgrade_from_version_4(tmp_path: Path) -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    from budget.db.migrate import MIGRATIONS_DIR
+
+    engine = create_db_engine(tmp_path / "budget.sqlite")
+    upgrade_to_head(engine)
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    with engine.begin() as connection:
+        config.attributes["connection"] = connection
+        command.downgrade(config, "0003")
+    assert "budget_lines" not in set(inspect(engine).get_table_names())
+    assert "kind" not in {c["name"] for c in inspect(engine).get_columns("categories")}

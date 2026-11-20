@@ -5,6 +5,8 @@ saisie des opérations, rapprochement bancaire, échéances et budget prévision
 
 ![Registre d'un compte](docs/capture-registre.png)
 
+![Grille du budget](docs/capture-budget.png)
+
 Voir [ARCHITECTURE.md](ARCHITECTURE.md) pour la conception et le plan de développement.
 
 ## Développement

@@ -10,11 +10,11 @@ Conventions :
 import datetime as dt
 from enum import StrEnum
 
-from sqlalchemy import Enum, ForeignKey, Index, String
+from sqlalchemy import Enum, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from budget.db.base import Base
-from budget.domain.enums import Frequency, ReconciliationStatus
+from budget.domain.enums import CategoryKind, Frequency, ReconciliationStatus
 
 
 def enum_column[E: StrEnum](enum_class: type[E]) -> Enum:
@@ -51,6 +51,12 @@ class Category(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"))
+    # Une sous-catégorie a toujours le type de sa catégorie parente (garanti par le service).
+    kind: Mapped[CategoryKind] = mapped_column(
+        enum_column(CategoryKind),
+        default=CategoryKind.EXPENSE,
+        server_default=CategoryKind.EXPENSE.value,
+    )
 
     parent: Mapped[Category | None] = relationship(
         back_populates="children", remote_side="Category.id"
@@ -66,6 +72,25 @@ class Category(Base):
 
     def __repr__(self) -> str:
         return f"Category(id={self.id}, name={self.name!r}, parent_id={self.parent_id})"
+
+
+class BudgetLine(Base):
+    """Montant prévu pour une catégorie et un mois.
+
+    Le montant est toujours **positif** : le sens (dépense ou recette) vient de `Category.kind`.
+    Un montant nul n'est pas stocké : l'absence de ligne signifie « rien de prévu ».
+    """
+
+    __tablename__ = "budget_lines"
+    __table_args__ = (
+        UniqueConstraint("category_id", "year", "month", name="uq_budget_lines_category_month"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"))
+    year: Mapped[int]
+    month: Mapped[int]  # 1 à 12
+    planned_cents: Mapped[int]
 
 
 class Payee(Base):

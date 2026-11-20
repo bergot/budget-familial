@@ -196,14 +196,15 @@ budget-familial/
 │   │   ├── base.py             # moteur, PRAGMA foreign_keys=ON, unit_of_work
 │   │   ├── models.py           # tables
 │   │   ├── migrate.py          # applique les migrations au démarrage
-│   │   └── migrations/         # scripts Alembic (env.py, versions/0001, 0002...)
+│   │   └── migrations/         # scripts Alembic (env.py, versions/0001 à 0004)
 │   ├── services/
 │   │   ├── accounts.py         # comptes, soldes
-│   │   ├── categories.py
+│   │   ├── categories.py       # catégories à deux niveaux, type dépense / recette
 │   │   ├── lookups.py          # tiers, moyens de paiement
 │   │   ├── transactions.py     # opérations, virements, registre
 │   │   ├── reconciliation.py   # pointage, écart, validation, annulation
 │   │   ├── schedules.py        # échéances et génération des opérations
+│   │   ├── budgets.py          # montants prévus, réalisé, grille du budget
 │   │   └── choices.py          # listes de choix pour les formulaires
 │   └── ui/
 │       ├── app.py              # open_database (migrations, échéances), QApplication, boucle
@@ -211,8 +212,8 @@ budget-familial/
 │       ├── main_window.py      # fenêtre principale, menus, actions
 │       ├── account_list.py     # liste des comptes (QTableView)
 │       ├── register_view.py    # registre d'un compte (QTableView)
-│       ├── models/             # QAbstractTableModel : account, register, pointing, schedule
-│       └── dialogs/            # account, transaction, transfer, categories, reconciliation, schedules
+│       ├── models/             # QAbstractTableModel : account, register, pointing, schedule, budget
+│       └── dialogs/            # account, transaction, transfer, categories, reconciliation, schedules, budget
 └── tests/
     ├── conftest.py             # base SQLite en mémoire, comptes d'exemple
     ├── domain/  db/  services/ # tests sans Qt
@@ -229,13 +230,13 @@ géré nativement par uv. Le budget s'ajoutera dans `services/` et `ui/` à l'é
 | Table | Colonnes principales | Contraintes |
 |---|---|---|
 | `Account` | `id`, `name`, `bank` (nullable), `initial_balance_cents`, `closed` | `name` unique |
-| `Category` | `id`, `name`, `parent_id` (auto-référence, nullable) | Deux niveaux maximum : catégorie, sous-catégorie |
+| `Category` | `id`, `name`, `parent_id` (auto-référence, nullable), `kind` (dépense / recette) | Deux niveaux maximum ; une sous-catégorie a le type de son parent |
 | `Payee` | `id`, `name` | `name` unique |
 | `PaymentMethod` | `id`, `name` | `name` unique |
 | `Transaction` | `id`, `account_id`, `date`, `payee_id`, `amount_cents` (signé), `category_id`, `payment_method_id`, `notes`, `status`, `reconciliation_id`, `transfer_peer_id`, `schedule_id` | Clés étrangères ; `transfer_peer_id` auto-référence |
 | `Reconciliation` | `id`, `account_id`, `statement_date`, `statement_balance_cents` | |
 | `Schedule` | `id`, `account_id`, `payee_id`, `amount_cents`, `category_id`, `payment_method_id`, `notes`, `frequency`, `start_date`, `end_date` (nullable), `generated_count`, `transfer_account_id` (nullable) | `transfer_account_id` renseigné pour un virement planifié ; `generated_count` = occurrences déjà générées |
-| `BudgetLine` | `id`, `category_id`, `year`, `month`, `planned_cents` | Unique sur (`category_id`, `year`, `month`) |
+| `BudgetLine` | `id`, `category_id`, `year`, `month`, `planned_cents` | Unique sur (`category_id`, `year`, `month`) ; montant **positif**, zéro = pas de ligne |
 
 ### Mise en œuvre par étapes
 
@@ -246,7 +247,7 @@ Les tables sont créées au fil des étapes, chacune avec sa migration Alembic.
 | 1 | `Account`, `Category`, `Payee`, `PaymentMethod`, `Transaction` | `0001` |
 | 3 | `Reconciliation` ; `Transaction.status` et `Transaction.reconciliation_id` | `0002` |
 | 4 | `Schedule` ; `Transaction.schedule_id` | `0003` |
-| 5 | `BudgetLine` | à venir |
+| 5 | `BudgetLine` ; `Category.kind` (type deviné pour les catégories existantes) | `0004` |
 
 Les tables portent des noms pluriels en base (`accounts`, `transactions`...). Dans le code,
 l'attribut `date` de `Transaction` est annoté `dt.date` (avec `import datetime as dt`) pour
@@ -392,13 +393,39 @@ pour changer de rythme, on termine l'échéance par une date de fin et on en cr�
 
 ### Budget
 
-- Une ligne par catégorie ou sous-catégorie, par année et par mois.
-- Recettes et dépenses sont traitées de la même façon (montants signés).
-- Le « réalisé » est la somme des opérations de la période pour la catégorie.
-- Le prévisionnel couvre l'année en cours et les suivantes.
-- Les virements entre comptes sont exclus du réalisé.
-- **Question ouverte** : le budget d'une catégorie parente est-il la somme de ses
-  sous-catégories, ou saisi indépendamment ? À trancher à l'étape 5.
+**Saisie.** Les montants prévus se saisissent toujours en **positif**, par catégorie et par mois ;
+c'est le **type de la catégorie** (dépense ou recette, `Category.kind`) qui donne le sens. Les
+recettes sont donc budgétées exactement comme les dépenses. Une sous-catégorie a toujours le type
+de sa catégorie parente. Un montant nul n'est pas stocké.
+
+**Réalisé.** Calculé à partir des opérations, jamais saisi : pour une dépense, c'est l'opposé de
+la somme des opérations (une dépense de 40 € compte +40, un remboursement la réduit) ; pour une
+recette, c'est la somme. Les **virements sont exclus**. Les opérations futures (y compris celles
+générées par les échéances) comptent : c'est le « prévisionnel contre réel ». Les opérations sans
+catégorie apparaissent sur une ligne « Non catégorisé » (séparées par signe), pour qu'un oubli de
+catégorisation ne fasse pas paraître le budget meilleur qu'il n'est.
+
+**Catégories parentes (décision de l'étape 5).** Une catégorie qui a des sous-catégories n'est pas
+modifiable directement : sa ligne est le **total** de ses sous-catégories et de sa ligne
+« (sans sous-catégorie) ». Cette dernière regroupe les opérations rangées directement dans la
+catégorie parente et son éventuel budget propre ; elle est masquée tant qu'elle est vide (case à
+cocher). Une catégorie sans sous-catégorie est une simple ligne modifiable. Ce choix évite les
+doubles comptes entre parent et enfants tout en laissant budgéter une opération rangée au niveau du
+parent, comme le fait Grisbi avec ses lignes « sans sous-budget ».
+
+**Grille.** Recettes, puis Dépenses, chacune avec son total, puis le **solde** (recettes -
+dépenses). Trois affichages : *Prévu* (modifiable), *Réalisé*, *Écart*. L'écart est positif quand
+c'est une bonne nouvelle : moins dépensé que prévu pour une dépense, plus encaissé que prévu pour
+une recette. Il n'est affiché que pour les **mois écoulés** (le mois en cours compris, avec son
+réalisé partiel) : comparer un mois à venir annoncerait des recettes « manquantes » et des
+économies fictives. Le total de l'écart ne porte que sur ces mois.
+
+**Pluriannuel.** Une année à la fois (de 2000 à 2100), avec « Recopier vers la droite » (la cellule
+courante jusqu'à décembre) et « Reprendre l'année précédente » (copie dans les cases encore vides).
+
+**Types existants.** À la migration `0004`, une catégorie dont les opérations sont globalement
+positives (virements exclus) devient une recette ; les autres restent des dépenses. Le type se
+corrige ensuite dans Données, Catégories.
 
 ---
 
@@ -674,12 +701,14 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 
 **Livrable** : opérations récurrentes créées automatiquement.
 
-### Étape 5 : budget (priorité : budget)
+### Étape 5 : budget (priorité : budget) : terminée
 
-- Modèle `BudgetLine`, service de calcul prévu/réalisé.
-- Grille éditable façon tableur : catégories en lignes, mois en colonnes, saisie directe
-  des montants prévus, année en cours et suivantes.
-- Décision sur le budget des catégories parentes (voir section 6).
+- Type dépense / recette des catégories ; table `BudgetLine` (migration `0004`, qui devine le type
+  des catégories déjà utilisées).
+- Service du budget : saisie, recopie, reprise d'une année, réalisé, totaux, écarts.
+- Grille façon tableur (`QTableView` avec cellules modifiables) : saisie directe, Entrée descend,
+  trois affichages (prévu, réalisé, écart), totaux calculés, plusieurs années.
+- Formulaire de catégorie (nom et type), colonne « Type » dans l'arbre des catégories.
 
 **Livrable** : suivi budgétaire prévisionnel contre réel.
 
@@ -706,6 +735,6 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 | Packaging | Comportement différent Linux / Windows | Build dans la CI dès l'étape 0 |
 | Qt débutant | Courbe d'apprentissage du modèle/vue | Interface minimale d'abord ; logique isolée dans les services |
 | Schéma de données | Évolutions une fois les données réelles saisies | Alembic dès la fin de l'étape 2 |
-| Budget parent/enfant | Somme des sous-catégories ou saisie indépendante | À trancher à l'étape 5 |
+| Budget parent/enfant | Somme des sous-catégories ou saisie indépendante | Tranché à l'étape 5 : le parent est un total ; ligne « sans sous-catégorie » pour son budget propre |
 | Horizon des échéances | Durée de génération à l'avance | Paramètre `horizon_months` du service (3 mois) ; réglage dans l'interface à envisager à l'étape 6 |
 | Sauvegarde | Perte du fichier de données | Sauvegardes automatiques à l'étape 6 ; d'ici là, copie manuelle |

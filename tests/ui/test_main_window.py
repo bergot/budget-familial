@@ -1,15 +1,17 @@
 """Tests de la fenêtre principale : on simule les actions de l'utilisateur."""
 
 import pytest
-from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QMessageBox
 from sqlalchemy.orm import Session, sessionmaker
 
 from budget.db.base import unit_of_work
+from budget.domain.enums import CategoryKind
 from budget.services import accounts, categories, lookups
 from budget.services import transactions as tx
 from budget.services.transactions import TransactionData
 from budget.ui.dialogs.account_dialog import AccountDialog
 from budget.ui.dialogs.categories_dialog import CategoriesDialog
+from budget.ui.dialogs.category_edit_dialog import CategoryEditDialog
 from budget.ui.dialogs.transaction_dialog import TransactionDialog
 from budget.ui.dialogs.transfer_dialog import TransferDialog
 from budget.ui.main_window import MainWindow
@@ -330,33 +332,38 @@ def test_edit_and_delete_are_disabled_without_selection(
 # --- Catégories -----------------------------------------------------------------------------
 
 
+def fill_category(name: str, kind: CategoryKind | None = None):  # type: ignore[no-untyped-def]
+    """Réponse programmée : remplit le formulaire de catégorie et le valide."""
+
+    def fill(box: QDialog) -> None:
+        assert isinstance(box, CategoryEditDialog)
+        box._name.setText(name)
+        if kind is CategoryKind.INCOME:
+            box._income.setChecked(True)
+        box.accept()
+
+    answer_next_dialog(fill)
+
+
 def test_categories_dialog_add_rename_delete(qapp, factory: Factory) -> None:  # type: ignore[no-untyped-def]
     dialog = CategoriesDialog(factory)
-
-    def type_name(name: str):  # type: ignore[no-untyped-def]
-        def fill(box: QDialog) -> None:
-            assert isinstance(box, QInputDialog)
-            box.setTextValue(name)
-            box.accept()
-
-        answer_next_dialog(fill)
 
     def top(index: int = 0):  # type: ignore[no-untyped-def]
         # L'arbre est reconstruit après chaque action : on relit toujours l'élément.
         return dialog._tree.topLevelItem(index)
 
-    type_name("Logement")
+    fill_category("Logement")
     dialog._on_add_root()
     assert top().text(0) == "Logement"
     assert dialog._selected() is top()  # la nouvelle catégorie est sélectionnée
 
-    type_name("Loyer")
+    fill_category("Loyer")
     dialog._on_add_child()
     assert top().childCount() == 1 and top().child(0).text(0) == "Loyer"
 
-    type_name("Charges")
+    fill_category("Charges")
     dialog._tree.setCurrentItem(top())
-    dialog._on_rename()
+    dialog._on_edit()
     assert top().text(0) == "Charges"
 
     answer_next_dialog(lambda box: click_button(box, "Supprimer"))  # type: ignore[arg-type]
@@ -380,8 +387,8 @@ def test_categories_dialog_shows_business_errors(qapp, factory: Factory) -> None
         box.accept()
 
     def type_duplicate(box: QDialog) -> None:
-        assert isinstance(box, QInputDialog)
-        box.setTextValue("logement")
+        assert isinstance(box, CategoryEditDialog)
+        box._name.setText("logement")
         answer_next_dialog(error_box)
         box.accept()
 
@@ -390,6 +397,76 @@ def test_categories_dialog_shows_business_errors(qapp, factory: Factory) -> None
 
     assert len(messages) == 1 and "existe déjà" in messages[0]
     assert dialog._tree.topLevelItemCount() == 1
+
+
+def test_categories_dialog_shows_and_sets_the_kind(qapp, factory: Factory) -> None:  # type: ignore[no-untyped-def]
+    dialog = CategoriesDialog(factory)
+    top = lambda index=0: dialog._tree.topLevelItem(index)  # noqa: E731
+
+    fill_category("Revenus", CategoryKind.INCOME)
+    dialog._on_add_root()
+    fill_category("Salaire")  # une sous-catégorie : le type vient du parent
+    dialog._on_add_child()
+    fill_category("Courses")  # par défaut : une dépense
+    dialog._on_add_root()
+
+    by_name = {top(i).text(0): top(i) for i in range(dialog._tree.topLevelItemCount())}
+    assert by_name["Revenus"].text(1) == "Recette"
+    assert by_name["Revenus"].child(0).text(1) == "Recette"  # héritée
+    assert by_name["Courses"].text(1) == "Dépense"
+    assert [h for h in ("Catégorie", "Type")] == [
+        dialog._tree.headerItem().text(0),
+        dialog._tree.headerItem().text(1),
+    ]
+
+
+def test_category_form_for_a_subcategory_cannot_change_the_kind(qapp, factory: Factory) -> None:  # type: ignore[no-untyped-def]
+    with unit_of_work(factory) as session:
+        root = categories.create_category(session, "Revenus", kind=CategoryKind.INCOME)
+        categories.create_category(session, "Salaire", parent_id=root.id)
+    dialog = CategoriesDialog(factory)
+    seen: list[tuple[bool, bool]] = []
+
+    def peek(box: QDialog) -> None:
+        assert isinstance(box, CategoryEditDialog)
+        seen.append((box._income.isChecked(), box._income.isEnabled()))
+        box.reject()
+
+    dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0).child(0))
+    answer_next_dialog(peek)
+    dialog._on_edit()
+    dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))
+    answer_next_dialog(peek)
+    dialog._on_edit()
+
+    assert seen == [(True, False), (True, True)]  # enfant : recette, figé ; parent : modifiable
+
+
+def test_changing_a_root_kind_through_the_dialog(qapp, factory: Factory) -> None:  # type: ignore[no-untyped-def]
+    with unit_of_work(factory) as session:
+        root = categories.create_category(session, "Revenus")
+        categories.create_category(session, "Salaire", parent_id=root.id)
+    dialog = CategoriesDialog(factory)
+    dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))
+
+    fill_category("Revenus", CategoryKind.INCOME)
+    dialog._on_edit()
+
+    assert dialog._tree.topLevelItem(0).text(1) == "Recette"
+    assert dialog._tree.topLevelItem(0).child(0).text(1) == "Recette"  # propagé
+
+
+def test_category_form_requires_a_name(qapp, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    from budget.ui.dialogs import category_edit_dialog
+
+    errors: list[str] = []
+    monkeypatch.setattr(
+        category_edit_dialog, "show_error", lambda _parent, error: errors.append(str(error))
+    )
+    dialog = CategoryEditDialog("Nouvelle")
+    dialog._name.setText("   ")
+    dialog.accept()
+    assert dialog.result() != QDialog.DialogCode.Accepted and len(errors) == 1
 
 
 def test_categories_dialog_buttons_follow_selection(qapp, factory: Factory) -> None:  # type: ignore[no-untyped-def]

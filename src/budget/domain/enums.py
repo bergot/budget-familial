@@ -39,3 +39,18 @@ _FREQUENCY_LABELS = {
     Frequency.YEARLY: "Annuelle",
 }
 _FREQUENCY_MONTHS = {Frequency.MONTHLY: 1, Frequency.QUARTERLY: 3, Frequency.YEARLY: 12}
+
+
+class CategoryKind(StrEnum):
+    """Nature d'une catégorie : une dépense ou une recette.
+
+    Le budget se saisit toujours avec des montants positifs ; c'est le type de la catégorie
+    qui dit s'il s'agit d'une sortie ou d'une entrée d'argent.
+    """
+
+    EXPENSE = "expense"
+    INCOME = "income"
+
+    @property
+    def label(self) -> str:
+        return "Dépense" if self is CategoryKind.EXPENSE else "Recette"

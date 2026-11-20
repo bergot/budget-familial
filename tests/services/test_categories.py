@@ -100,3 +100,69 @@ def test_delete_used_category_is_refused(session: Session, sg: Account, day: dt.
     )
     with pytest.raises(InvalidError):
         categories.delete_category(session, c.id)
+
+
+# --- Type : dépense ou recette --------------------------------------------------------------
+
+
+def test_categories_are_expenses_by_default(session: Session) -> None:
+    from budget.domain.enums import CategoryKind
+
+    assert categories.create_category(session, "Courses").kind is CategoryKind.EXPENSE
+
+
+def test_income_category_and_children_inherit_the_kind(session: Session) -> None:
+    from budget.domain.enums import CategoryKind
+
+    revenus = categories.create_category(session, "Revenus", kind=CategoryKind.INCOME)
+    salaire = categories.create_category(session, "Salaire", parent_id=revenus.id)
+    assert salaire.kind is CategoryKind.INCOME
+
+
+def test_child_ignores_the_kind_argument(session: Session) -> None:
+    from budget.domain.enums import CategoryKind
+
+    revenus = categories.create_category(session, "Revenus", kind=CategoryKind.INCOME)
+    child = categories.create_category(
+        session, "Salaire", parent_id=revenus.id, kind=CategoryKind.EXPENSE
+    )
+    assert child.kind is CategoryKind.INCOME  # le parent l'emporte
+
+
+def test_changing_a_root_kind_propagates_to_children(session: Session) -> None:
+    from budget.domain.enums import CategoryKind
+
+    root = categories.create_category(session, "Revenus")
+    child = categories.create_category(session, "Salaire", parent_id=root.id)
+
+    categories.set_category_kind(session, root.id, CategoryKind.INCOME)
+
+    assert root.kind is CategoryKind.INCOME and child.kind is CategoryKind.INCOME
+
+
+def test_a_child_kind_cannot_be_changed_on_its_own(session: Session) -> None:
+    from budget.domain.enums import CategoryKind
+
+    root = categories.create_category(session, "Revenus")
+    child = categories.create_category(session, "Salaire", parent_id=root.id)
+    with pytest.raises(InvalidError, match="suit le type"):
+        categories.set_category_kind(session, child.id, CategoryKind.INCOME)
+
+
+def test_update_category_renames_and_changes_kind(session: Session) -> None:
+    from budget.domain.enums import CategoryKind
+
+    root = categories.create_category(session, "Revenu")
+    categories.update_category(session, root.id, name="Revenus", kind=CategoryKind.INCOME)
+    assert (root.name, root.kind) == ("Revenus", CategoryKind.INCOME)
+
+
+def test_update_category_keeps_a_childs_kind(session: Session) -> None:
+    from budget.domain.enums import CategoryKind
+
+    root = categories.create_category(session, "Revenus", kind=CategoryKind.INCOME)
+    child = categories.create_category(session, "Salair", parent_id=root.id)
+    categories.update_category(session, child.id, name="Salaire", kind=CategoryKind.INCOME)
+    assert child.name == "Salaire"
+    with pytest.raises(InvalidError):  # mais on ne peut pas lui imposer un autre type
+        categories.update_category(session, child.id, name="Salaire", kind=CategoryKind.EXPENSE)
