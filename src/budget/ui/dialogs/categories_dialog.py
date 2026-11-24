@@ -16,22 +16,30 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from budget.domain.enums import CategoryKind
 from budget.services import categories
+from budget.settings import SettingsStore
 from budget.ui.dialogs.category_edit_dialog import CategoryEditDialog
 from budget.ui.dialogs.common import confirm, run_action
+from budget.ui.geometry import RememberedSizeDialog
 
 _ID_ROLE = Qt.ItemDataRole.UserRole
 _KIND_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
-class CategoriesDialog(QDialog):
+class CategoriesDialog(RememberedSizeDialog):
     """Arbre des catégories, avec ajout, modification et suppression.
 
     Contrairement aux autres dialogues, celui-ci agit directement sur la base : chaque
     bouton valide aussitôt son changement (il n'y a pas de bouton « Enregistrer »).
     """
 
-    def __init__(self, session_factory: sessionmaker[Session], parent: QWidget | None = None):
-        super().__init__(parent)
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        parent: QWidget | None = None,
+        *,
+        store: SettingsStore | None = None,
+    ) -> None:
+        super().__init__(store, "categories", parent)
         self.setWindowTitle("Catégories")
         self.resize(580, 500)
         self._factory = session_factory
@@ -63,6 +71,7 @@ class CategoriesDialog(QDialog):
         layout.addLayout(side)
 
         self._reload()
+        self.restore_saved_size()
 
     # --- Affichage ---------------------------------------------------------------------
 

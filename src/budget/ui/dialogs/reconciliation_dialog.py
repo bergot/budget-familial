@@ -7,7 +7,6 @@ from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
-    QDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -25,6 +24,7 @@ from budget.domain.money import format_cents, parse_amount
 from budget.services import accounts
 from budget.services import reconciliation as rec
 from budget.services.transactions import RegisterLine
+from budget.settings import SettingsStore
 from budget.ui.dialogs.common import (
     confirm,
     date_value,
@@ -32,13 +32,14 @@ from budget.ui.dialogs.common import (
     make_date_edit,
     run_action,
 )
+from budget.ui.geometry import RememberedSizeDialog
 from budget.ui.models.pointing_model import COL_NOTES, PointingTableModel
 
 _RED = "color: #c0392b; font-weight: bold;"
 _GREEN = "color: #1e8449; font-weight: bold;"
 
 
-class ReconciliationDialog(QDialog):
+class ReconciliationDialog(RememberedSizeDialog):
     """Rapprochement d'un compte.
 
     Le pointage est enregistré à chaque case cochée : on peut fermer la fenêtre et reprendre
@@ -51,9 +52,10 @@ class ReconciliationDialog(QDialog):
         account_id: int,
         *,
         today: dt.date | None = None,
+        store: SettingsStore | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(store, "reconciliation", parent)
         self._factory = session_factory
         self._account_id = account_id
         self._all_lines: list[RegisterLine] = []
@@ -149,6 +151,7 @@ class ReconciliationDialog(QDialog):
 
         self._reload()
         self._balance.setFocus()
+        self.restore_saved_size()
 
     # --- Chargement ----------------------------------------------------------------------------
 

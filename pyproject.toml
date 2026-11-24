@@ -1,6 +1,6 @@
 [project]
 name = "budget-familial"
-version = "0.1.0"
+version = "1.0.0"
 description = "Application de gestion de budget familial (comptes, rapprochement, échéances, budget)"
 readme = "README.md"
 license = "MIT"

@@ -1,10 +1,12 @@
 """Fenêtre principale : liste des comptes à gauche, registre du compte choisi à droite."""
 
 import datetime as dt
+import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QFont, QKeySequence
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QFont, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
     QLabel,
@@ -16,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session, sessionmaker
 
-from budget import __version__
+from budget import __version__, backup
 from budget.db.base import unit_of_work
 from budget.domain.enums import ReconciliationStatus
 from budget.domain.errors import BudgetError
@@ -27,15 +29,19 @@ from budget.services import schedules as sch
 from budget.services import transactions as tx
 from budget.services.choices import load_choices
 from budget.services.transactions import RegisterLine, TransactionData
+from budget.settings import SettingsStore
+from budget.startup import StartupReport
 from budget.ui.account_list import AccountList
 from budget.ui.dialogs.account_dialog import AccountDialog, AccountInput
 from budget.ui.dialogs.budget_dialog import BudgetDialog
 from budget.ui.dialogs.categories_dialog import CategoriesDialog
 from budget.ui.dialogs.common import confirm, show_error
+from budget.ui.dialogs.preferences_dialog import PreferencesDialog
 from budget.ui.dialogs.reconciliation_dialog import ReconciliationDialog
 from budget.ui.dialogs.schedules_dialog import SchedulesDialog
 from budget.ui.dialogs.transaction_dialog import TransactionDialog, TransactionInput
 from budget.ui.dialogs.transfer_dialog import TransferDialog
+from budget.ui.geometry import restore_geometry, restore_splitter, save_geometry, save_splitter
 from budget.ui.register_view import RegisterView
 
 
@@ -45,10 +51,14 @@ class MainWindow(QMainWindow):
         session_factory: sessionmaker[Session],
         *,
         today: Callable[[], dt.date] = dt.date.today,
+        store: SettingsStore | None = None,
+        database: Path | None = None,
     ) -> None:
         super().__init__()
         self._factory = session_factory
         self._today = today  # injectable : les tests imposent une date fixe
+        self._store = store or SettingsStore()  # sans fichier : rien n'est enregistré
+        self._database = database  # nécessaire pour les sauvegardes
         self._show_closed = False
 
         self.setWindowTitle("Budget familial")
@@ -72,12 +82,20 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._register, stretch=1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter = splitter
         splitter.addWidget(self._accounts)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([420, 830])
         self.setCentralWidget(splitter)
+
+        # Version affichée en permanence dans la barre d'état.
+        self.statusBar().addPermanentWidget(QLabel(f"Version {__version__}"))
+
+        # Taille et position du dernier lancement, s'il y en a.
+        restore_geometry(self, store, "main")
+        restore_splitter(splitter, store, "main_splitter")
 
         self._create_actions()
         self._create_menus()
@@ -134,6 +152,12 @@ class MainWindow(QMainWindow):
         self.act_schedules = self._make_action("&Gérer les échéances…", self._on_schedules)
         self.act_budget = self._make_action("&Ouvrir le budget…", self._on_budget, "Ctrl+B")
 
+        self.act_preferences = self._make_action("&Préférences…", self._on_preferences, "Ctrl+,")
+        self.act_backup_now = self._make_action("&Sauvegarder maintenant", self._on_backup_now)
+        self.act_open_backups = self._make_action(
+            "Ouvrir le dossier des &sauvegardes", self._on_open_backups
+        )
+
         self.act_categories = self._make_action("&Catégories…", self._on_categories)
         self.act_about = self._make_action("À &propos", self._on_about)
 
@@ -141,6 +165,11 @@ class MainWindow(QMainWindow):
         bar = self.menuBar()
 
         file_menu = bar.addMenu("&Fichier")
+        file_menu.addAction(self.act_preferences)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_backup_now)
+        file_menu.addAction(self.act_open_backups)
+        file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
 
         account_menu = bar.addMenu("&Comptes")
@@ -482,7 +511,9 @@ class MainWindow(QMainWindow):
         account_id = self._accounts.selected_account_id()
         if account_id is None:
             return
-        dialog = ReconciliationDialog(self._factory, account_id, today=self._today(), parent=self)
+        dialog = ReconciliationDialog(
+            self._factory, account_id, today=self._today(), store=self._store, parent=self
+        )
         validated = dialog.exec() == QDialog.DialogCode.Accepted
         # Même sans validation, des opérations ont pu être pointées : on rafraîchit toujours.
         self.refresh(select_account_id=account_id)
@@ -514,6 +545,20 @@ class MainWindow(QMainWindow):
 
     # --- Échéances ------------------------------------------------------------------------
 
+    def report_startup(self, report: StartupReport) -> None:
+        """Signale ce qui s'est passé au lancement : sauvegarde, échéances."""
+        if report.backup.error:
+            show_error(
+                self,
+                "La sauvegarde automatique du jour a échoué :\n\n"
+                f"{report.backup.error}\n\nL'application fonctionne normalement. Vérifiez le "
+                "dossier des sauvegardes dans Fichier, Préférences.",
+                "Sauvegarde",
+            )
+        self.report_generation(report.generation)
+        if report.backup.path is not None and not report.generation.created:
+            self.statusBar().showMessage("Sauvegarde du jour créée.", 5000)
+
     def report_generation(self, result: sch.GenerationResult) -> None:
         """Informe l'utilisateur du résultat de la génération des échéances (au démarrage)."""
         if result.created:
@@ -531,23 +576,95 @@ class MainWindow(QMainWindow):
             )
 
     def _on_schedules(self) -> None:
-        SchedulesDialog(self._factory, today=self._today(), parent=self).exec()
+        SchedulesDialog(
+            self._factory,
+            today=self._today(),
+            horizon_months=self._store.settings.schedule_horizon_months,
+            store=self._store,
+            parent=self,
+        ).exec()
         self.refresh()  # des opérations ont pu être générées
 
     # --- Budget ---------------------------------------------------------------------------
 
     def _on_budget(self) -> None:
-        BudgetDialog(self._factory, today=self._today(), parent=self).exec()
+        BudgetDialog(self._factory, today=self._today(), store=self._store, parent=self).exec()
+
+    # --- Préférences et sauvegardes -------------------------------------------------------
+
+    def _now(self) -> dt.datetime:
+        """Date (injectable pour les tests) et heure réelle."""
+        return dt.datetime.combine(self._today(), dt.datetime.now().time())
+
+    def _on_preferences(self) -> None:
+        settings = self._store.settings
+        dialog = PreferencesDialog(settings, database=self._database, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        horizon_changed = values.schedule_horizon_months != settings.schedule_horizon_months
+        settings.schedule_horizon_months = values.schedule_horizon_months
+        settings.backup_enabled = values.backup_enabled
+        settings.backup_keep = values.backup_keep
+        settings.backup_dir = values.backup_dir
+        if not self._store.save():
+            show_error(
+                self,
+                "Les préférences n'ont pas pu être enregistrées sur le disque : elles ne "
+                "seront valables que jusqu'à la fermeture de l'application.",
+                "Préférences",
+            )
+        if horizon_changed:
+            # Un horizon plus lointain doit créer les opérations correspondantes tout de suite.
+            self._run_void(
+                lambda session: sch.generate_due_transactions(
+                    session,
+                    today=self._today(),
+                    horizon_months=settings.schedule_horizon_months,
+                )
+            )
+            self.refresh()
+        self.statusBar().showMessage("Préférences enregistrées.", 4000)
+
+    def _on_backup_now(self) -> None:
+        if self._database is None:
+            show_error(self, "Aucun fichier de données n'est ouvert.", "Sauvegarde")
+            return
+        try:
+            path, removed = backup.backup_now(self._database, self._store.settings, now=self._now())
+        except (OSError, sqlite3.Error, backup.BackupError) as error:
+            show_error(self, f"La sauvegarde a échoué :\n\n{error}", "Sauvegarde")
+            return
+        text = f"Sauvegarde créée : {path.name}"
+        if removed:
+            plural = "s" if len(removed) > 1 else ""
+            text += f" ({len(removed)} ancienne{plural} supprimée{plural})"
+        self.statusBar().showMessage(text, 8000)
+
+    def _on_open_backups(self) -> None:
+        if self._database is None:
+            return
+        folder = backup.backup_dir_for(self._database, self._store.settings.backup_dir)
+        folder.mkdir(
+            parents=True, exist_ok=True
+        )  # pour que l'explorateur ait quelque chose à ouvrir
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """À la fermeture : mémorise la taille de la fenêtre pour le prochain lancement."""
+        save_geometry(self, self._store, "main")
+        save_splitter(self._splitter, self._store, "main_splitter")
+        self._store.save()
+        super().closeEvent(event)
 
     # --- Divers ---------------------------------------------------------------------------
 
     def _on_categories(self) -> None:
-        CategoriesDialog(self._factory, self).exec()
+        CategoriesDialog(self._factory, self, store=self._store).exec()
         self.refresh()  # les noms de catégorie du registre ont pu changer
 
     def _on_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "À propos",
-            f"<b>Budget familial</b> {__version__}<br>Licence MIT.",
-        )
+        details = [f"<b>Budget familial</b> {__version__}", "Licence MIT."]
+        if self._database is not None:
+            details.append(f"Fichier de données : {self._database}")
+        QMessageBox.about(self, "À propos", "<br>".join(details))

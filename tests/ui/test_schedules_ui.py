@@ -15,8 +15,8 @@ from budget.services import schedules as sch
 from budget.services import transactions as tx
 from budget.services.choices import Choice, Choices, load_choices
 from budget.services.schedules import ScheduleData, ScheduleLine
+from budget.startup import open_database
 from budget.ui import main_window as main_window_module
-from budget.ui.app import open_database
 from budget.ui.dialogs.schedule_form_dialog import ScheduleFormDialog
 from budget.ui.dialogs.schedules_dialog import SchedulesDialog
 from budget.ui.main_window import MainWindow
@@ -487,7 +487,7 @@ def test_report_generation_tells_the_user(
 def test_startup_generates_schedules_without_duplicates(tmp_path: Path) -> None:
     database = tmp_path / "budget.sqlite"
     factory, first = open_database(database, today=TODAY)
-    assert first.created == 0  # base neuve : aucune échéance
+    assert first.generation.created == 0  # base neuve : aucune échéance
 
     with unit_of_work(factory) as session:
         sg = accounts.create_account(session, "SG").id
@@ -496,15 +496,15 @@ def test_startup_generates_schedules_without_duplicates(tmp_path: Path) -> None:
 
     # Deuxième lancement, le même jour : les opérations sont créées.
     factory, second = open_database(database, today=TODAY)
-    assert second.created == 4
+    assert second.generation.created == 4
     # Troisième lancement, le même jour : rien de plus.
     factory, third = open_database(database, today=TODAY)
-    assert third.created == 0
+    assert third.generation.created == 0
     # Un lancement plus tard dans l'année rattrape le retard.
     factory, later = open_database(database, today=D(2026, 6, 20))
-    assert later.created == 3  # horizon au 20 septembre : juillet, août et septembre
+    assert later.generation.created == 3  # horizon au 20 septembre : juillet, août et septembre
     with factory() as session:
-        assert len(tx.list_transactions(session, sg)) == 4 + later.created
+        assert len(tx.list_transactions(session, sg)) == 4 + later.generation.created
 
 
 def test_startup_reports_skipped_schedules(tmp_path: Path) -> None:
@@ -515,7 +515,8 @@ def test_startup_reports_skipped_schedules(tmp_path: Path) -> None:
         sch.create_schedule(session, ScheduleData(sg, -100, Frequency.MONTHLY, D(2026, 3, 5)))
         accounts.set_account_closed(session, sg, closed=True)
 
-    _, result = open_database(database, today=TODAY)
+    _, report = open_database(database, today=TODAY)
+    result = report.generation
 
     assert result.created == 0
     assert len(result.skipped) == 1 and "clôturé" in result.skipped[0].reason

@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from budget.ui.app import run
+from budget import __version__
 
 
 def main() -> None:
@@ -15,8 +15,17 @@ def main() -> None:
         metavar="FICHIER",
         help="fichier SQLite à utiliser (par défaut : le dossier de données de l'utilisateur)",
     )
+    parser.add_argument("--version", action="version", version=f"Budget familial {__version__}")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="démarre, vérifie que tout fonctionne puis quitte (utilisé par la CI)",
+    )
     args = parser.parse_args()
-    sys.exit(run(args.base))
+
+    from budget.ui.app import run  # import tardif : `--help` et `--version` restent instantanés
+
+    sys.exit(run(args.base, smoke_test=args.smoke_test))
 
 
 if __name__ == "__main__":

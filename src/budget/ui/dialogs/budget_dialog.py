@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
-    QDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -22,7 +21,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from budget.domain.money import parse_amount
 from budget.services import budgets as bud
 from budget.services.budgets import RowKind
+from budget.settings import SettingsStore
 from budget.ui.dialogs.common import run_action, show_error
+from budget.ui.geometry import RememberedSizeDialog
 from budget.ui.models.budget_model import (
     COL_LABEL,
     COL_TOTAL,
@@ -55,15 +56,16 @@ class BudgetGridView(QTableView):
                 self.setCurrentIndex(below)
 
 
-class BudgetDialog(QDialog):
+class BudgetDialog(RememberedSizeDialog):
     def __init__(
         self,
         session_factory: sessionmaker[Session],
         *,
         today: dt.date | None = None,
+        store: SettingsStore | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(store, "budget", parent)
         self._factory = session_factory
         self._today = today or dt.date.today()
         self.setWindowTitle("Budget")
@@ -143,6 +145,7 @@ class BudgetDialog(QDialog):
         self._view.selectionModel().currentChanged.connect(lambda *_: self._update_buttons())
 
         self._reload()
+        self.restore_saved_size()
 
     # --- Chargement ----------------------------------------------------------------------
 

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="fond" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b7f6a"/>
+      <stop offset="1" stop-color="#0f4f5c"/>
+    </linearGradient>
+  </defs>
+  <!-- Fond : carré arrondi -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#fond)"/>
+  <!-- Pièce -->
+  <circle cx="128" cy="128" r="84" fill="#ffffff" fill-opacity="0.14"/>
+  <circle cx="128" cy="128" r="84" fill="none" stroke="#ffffff" stroke-width="8" stroke-opacity="0.9"/>
+  <!-- Symbole euro : un « C » ouvert à droite, barré de deux traits -->
+  <path d="M 164 92 A 52 52 0 1 0 164 164" fill="none" stroke="#ffffff" stroke-width="20" stroke-linecap="round"/>
+  <line x1="84" y1="114" x2="152" y2="114" stroke="#ffffff" stroke-width="15" stroke-linecap="round"/>
+  <line x1="84" y1="142" x2="152" y2="142" stroke="#ffffff" stroke-width="15" stroke-linecap="round"/>
+</svg>

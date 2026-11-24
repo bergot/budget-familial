@@ -64,7 +64,18 @@ jobs:
       - name: Construction avec PyInstaller
         run: uv run pyinstaller --noconfirm budget-familial.spec
 
+      # Lance l'exécutable construit : il doit démarrer, créer sa base et trouver son icône.
+      # C'est le seul endroit où l'on vérifie le build Windows pour de vrai.
+      - name: Test de fumée de l'exécutable
+        run: uv run python packaging/smoke_test.py dist/budget-familial
+
+      - name: Archive de distribution
+        run: uv run python packaging/make_archive.py dist/budget-familial
+
       - uses: actions/upload-artifact@v6
         with:
           name: budget-familial-${{ runner.os }}
-          path: dist/budget-familial
+          path: |
+            dist/budget-familial-*.zip
+            dist/budget-familial-*.tar.gz
+          if-no-files-found: error

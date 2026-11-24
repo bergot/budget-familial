@@ -1,47 +1,56 @@
 """Création de l'application Qt, ouverture de la base et boucle d'événements."""
 
-import datetime as dt
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
-from sqlalchemy.orm import Session, sessionmaker
 
-from budget.db.base import create_db_engine, make_session_factory, unit_of_work
-from budget.db.migrate import upgrade_to_head
-from budget.paths import database_file
-from budget.services.lookups import ensure_default_payment_methods
-from budget.services.schedules import GenerationResult, generate_due_transactions
+from budget import __version__
+from budget.paths import database_file, settings_file
+from budget.settings import SettingsStore
+from budget.startup import open_database
 from budget.ui.i18n import install_french
+from budget.ui.icons import load_app_icon
 from budget.ui.main_window import MainWindow
 
+EXIT_MISSING_ICON = 3
 
-def open_database(
-    database: Path | None = None, *, today: dt.date | None = None
-) -> tuple[sessionmaker[Session], GenerationResult]:
-    """Prépare la base au lancement : migrations, valeurs par défaut, génération des échéances.
 
-    Retourne la fabrique de sessions et le résultat de la génération (à signaler à
-    l'utilisateur). Séparée de `run` pour pouvoir être testée sans interface.
+def _finish_smoke_test(app: QApplication, icon: QIcon) -> int:
+    """Fin du test de fumée : l'application a démarré, on vérifie l'icône puis on quitte."""
+    if icon.isNull():
+        print(
+            "Test de fumée : l'icône est introuvable (fichiers de données absents ?)",
+            file=sys.stderr,
+        )
+        return EXIT_MISSING_ICON
+    QTimer.singleShot(300, app.quit)  # laisse à la fenêtre le temps de s'afficher vraiment
+    return int(app.exec())
+
+
+def run(database: Path | None = None, *, smoke_test: bool = False) -> int:
+    """Lance l'application. `database` : fichier SQLite (par défaut, l'emplacement standard).
+
+    `smoke_test` démarre, ouvre la base et la fenêtre, vérifie l'icône puis quitte tout de
+    suite, sans rien écrire dans les réglages de l'utilisateur : la CI s'en sert pour
+    contrôler qu'un exécutable construit fonctionne vraiment.
     """
-    engine = create_db_engine(database or database_file())
-    upgrade_to_head(engine)  # crée la base au premier lancement, la met à jour ensuite
-    factory = make_session_factory(engine)
-    with unit_of_work(factory) as session:
-        ensure_default_payment_methods(session)
-        # Crée les opérations des échéances (rattrape aussi les lancements manqués).
-        generation = generate_due_transactions(session, today=today or dt.date.today())
-    return factory, generation
-
-
-def run(database: Path | None = None) -> int:
-    """Lance l'application. `database` : fichier SQLite (par défaut, l'emplacement standard)."""
     app = QApplication(sys.argv)
     app.setApplicationName("Budget familial")
+    app.setApplicationVersion(__version__)
+    icon = load_app_icon()
+    app.setWindowIcon(icon)
     install_french(app)
 
-    factory, generation = open_database(database)
-    window = MainWindow(factory)
+    store = SettingsStore() if smoke_test else SettingsStore.load(settings_file())
+    path = database or database_file()
+    factory, report = open_database(path, settings=store.settings)
+
+    window = MainWindow(factory, store=store, database=path)
     window.show()
-    window.report_generation(generation)
-    return app.exec()  # bloque jusqu'à la fermeture de la fenêtre
+    if smoke_test:
+        return _finish_smoke_test(app, icon)
+    window.report_startup(report)
+    return int(app.exec())  # bloque jusqu'à la fermeture de la fenêtre

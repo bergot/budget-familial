@@ -82,7 +82,8 @@ Les échéances sont développées entre le rapprochement et le budget.
 | Gestion du projet | uv | Environnement, dépendances, verrouillage. |
 | Tests | pytest | Base SQLite en mémoire. |
 | Qualité du code | ruff (lint + format) | Un seul outil. Types vérifiés par mypy en mode strict (`uv run mypy`). |
-| Packaging | PyInstaller | Un build par système d'exploitation. |
+| Packaging | PyInstaller | Un build par système d'exploitation ; test de fumée de l'exécutable en CI. |
+| Réglages | Fichier JSON (stdlib) | Pas de dépendance à Qt : lus avant toute fenêtre, testables. |
 | Intégration continue | GitHub Actions | Matrice Linux / Windows. |
 | Licence | MIT | |
 | Éditeur | Zed | |
@@ -181,21 +182,32 @@ budget-familial/
 ├── LICENSE                     # MIT
 ├── README.md
 ├── ARCHITECTURE.md             # ce document
-├── .github/workflows/ci.yml    # lint, types, tests, exécutables : Linux et Windows
-├── packaging/launcher.py       # script de lancement pour PyInstaller
+├── docs/                       # captures d'écran du README
+├── .github/workflows/
+│   ├── ci.yml                  # lint, types, tests, exécutable + test de fumée : Linux et Windows
+│   └── release.yml             # publication d'une version à la pose d'un tag vX.Y.Z
+├── packaging/
+│   ├── launcher.py             # script de lancement pour PyInstaller
+│   ├── smoke_test.py           # test de fumée de l'exécutable construit
+│   ├── make_archive.py         # archive de distribution (.tar.gz Linux, .zip Windows)
+│   ├── make_icons.py           # régénère les PNG et l'.ico depuis icon.svg
+│   └── make_screenshots.py     # régénère les captures du README (données fictives)
 ├── src/budget/
 │   ├── __init__.py             # numéro de version
-│   ├── __main__.py             # point d'entrée (option --base FICHIER)
-│   ├── paths.py                # emplacement des données (pathlib + platformdirs)
+│   ├── __main__.py             # point d'entrée (--base, --version, --smoke-test)
+│   ├── paths.py                # emplacements des données et des réglages (platformdirs)
+│   ├── settings.py             # réglages JSON : horizon, sauvegardes, taille des fenêtres
+│   ├── backup.py               # sauvegardes horodatées avec rotation
+│   ├── startup.py              # préparation de la base au lancement (sans Qt)
 │   ├── domain/
-│   │   ├── enums.py            # ReconciliationStatus (none / pointed / reconciled)
+│   │   ├── enums.py            # ReconciliationStatus, Frequency, CategoryKind
 │   │   ├── recurrence.py       # dates des échéances (fins de mois, sans dérive)
 │   │   ├── errors.py           # BudgetError, NotFoundError, DuplicateError, InvalidError
 │   │   └── money.py            # centimes <-> "12,50 €"
 │   ├── db/
 │   │   ├── base.py             # moteur, PRAGMA foreign_keys=ON, unit_of_work
 │   │   ├── models.py           # tables
-│   │   ├── migrate.py          # applique les migrations au démarrage
+│   │   ├── migrate.py          # applique les migrations (avec copie préalable du fichier)
 │   │   └── migrations/         # scripts Alembic (env.py, versions/0001 à 0004)
 │   ├── services/
 │   │   ├── accounts.py         # comptes, soldes
@@ -207,21 +219,26 @@ budget-familial/
 │   │   ├── budgets.py          # montants prévus, réalisé, grille du budget
 │   │   └── choices.py          # listes de choix pour les formulaires
 │   └── ui/
-│       ├── app.py              # open_database (migrations, échéances), QApplication, boucle
+│       ├── app.py              # QApplication, icône, réglages, boucle d'événements
 │       ├── i18n.py             # Qt en français
+│       ├── icons.py            # chargement de l'icône
+│       ├── geometry.py         # mémorisation de la taille des fenêtres
 │       ├── main_window.py      # fenêtre principale, menus, actions
 │       ├── account_list.py     # liste des comptes (QTableView)
 │       ├── register_view.py    # registre d'un compte (QTableView)
+│       ├── resources/          # icon.svg, icon-<taille>.png, icon.ico
 │       ├── models/             # QAbstractTableModel : account, register, pointing, schedule, budget
-│       └── dialogs/            # account, transaction, transfer, categories, reconciliation, schedules, budget
+│       └── dialogs/            # account, transaction, transfer, categories, reconciliation,
+│                               # schedules, budget, preferences
 └── tests/
     ├── conftest.py             # base SQLite en mémoire, comptes d'exemple
     ├── domain/  db/  services/ # tests sans Qt
+    ├── test_settings.py  test_backup.py  test_startup.py  test_version.py
     └── ui/                     # tests Qt (plugin « offscreen »), helpers de dialogues
 ```
 
 L'agencement `src/` empêche d'importer par accident le code non installé et est
-géré nativement par uv. Le budget s'ajoutera dans `services/` et `ui/` à l'étape suivante.
+géré nativement par uv.
 
 ---
 
@@ -426,6 +443,44 @@ courante jusqu'à décembre) et « Reprendre l'année précédente » (copie dan
 **Types existants.** À la migration `0004`, une catégorie dont les opérations sont globalement
 positives (virements exclus) devient une recette ; les autres restent des dépenses. Le type se
 corrige ensuite dans Données, Catégories.
+
+### Réglages, sauvegardes et démarrage
+
+**Démarrage** (`startup.py`, sans Qt, donc testable). Dans l'ordre : migrations du schéma (avec
+copie préalable du fichier si une migration est en attente), valeurs par défaut, **sauvegarde du
+jour**, puis génération des opérations des échéances. La sauvegarde passe avant la génération
+pour capturer les données telles que l'utilisateur les a laissées. Le résultat (`StartupReport`) est
+signalé dans la fenêtre : un échec de sauvegarde ou une échéance ignorée est dit à l'utilisateur,
+sans empêcher le démarrage.
+
+**Réglages** (`settings.py`). Un petit fichier JSON, lisible et modifiable à la main :
+`~/.config/budget-familial/settings.json` sous Linux, `%LOCALAPPDATA%\budget-familial\settings.json`
+sous Windows. Il contient l'horizon des échéances (1 à 24 mois, 3 par défaut), la sauvegarde
+automatique (activée, 14 copies conservées, dossier) et la taille des fenêtres. Chaque valeur est
+contrôlée une à une ; un fichier absent ou abîmé ne bloque jamais l'application : on retombe sur les
+valeurs par défaut et le fichier abîmé est mis de côté (`.corrompu`). L'écriture est atomique.
+
+**Sauvegardes** (`backup.py`). Une copie horodatée par jour au plus, au lancement, dans le dossier
+`sauvegardes` à côté du fichier de données (ou le dossier choisi dans les préférences), nommée
+`budget-AAAA-MM-JJ-HHMMSS.sqlite`. Quelques choix qui comptent :
+
+- l'**API de sauvegarde de SQLite** donne une copie cohérente même base ouverte (une simple copie
+  de fichier ne le garantit pas) ;
+- la copie est écrite sous un nom provisoire puis renommée, et **vérifiée** (`PRAGMA
+  integrity_check`) avant d'être conservée : une sauvegarde illisible rassure à tort ;
+- la rotation ne garde que les N plus récentes et ne touche **jamais** aux autres fichiers (en
+  particulier les copies « avant migration » `budget.sqlite.avant-000N.bak`) ;
+- la date vient du nom du fichier, pas de sa date de modification ;
+- une base vide (aucun compte) n'est pas sauvegardée.
+
+Menu Fichier : « Sauvegarder maintenant » (sans limite quotidienne), « Ouvrir le dossier des
+sauvegardes », « Préférences… ». **Restauration** : fermer l'application, remplacer
+`budget.sqlite` par la copie voulue ; si elle est plus ancienne que l'application, les migrations
+la mettent à niveau au lancement suivant.
+
+**Taille des fenêtres.** Mémorisée à la fermeture (fenêtre principale, séparateur et quatre
+grandes fenêtres). Qt ramène lui-même une fenêtre dans l'écran disponible si l'écran où elle se
+trouvait a disparu.
 
 ---
 
@@ -712,11 +767,17 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 
 **Livrable** : suivi budgétaire prévisionnel contre réel.
 
-### Étape 6 : finitions
+### Étape 6 : finitions : terminée
 
-- Sauvegardes du fichier SQLite (copie horodatée, avec rotation).
-- Packaging final Linux et Windows, icône, version affichée.
-- README complet pour le dépôt public, documentation d'installation et d'utilisation.
+1. Sauvegardes régulières (copie horodatée par jour, rotation, vérification d'intégrité), en plus de
+   la copie avant migration ; sauvegarde manuelle ; dossier configurable.
+2. Préférences : horizon des échéances, sauvegardes.
+3. Taille et position des fenêtres mémorisées.
+4. Icône (SVG, PNG, `.ico` pour Windows) et version affichée (barre d'état, « À propos »,
+   `--version`) ; passage en 1.0.0.
+5. Vérification du packaging : test de fumée de l'exécutable construit (`--smoke-test`), exécuté par
+   la CI sous Linux **et** Windows ; archives de distribution ; publication par tag (`release.yml`).
+6. README complet pour le dépôt public.
 
 **Livrable** : version publiable.
 
@@ -736,5 +797,7 @@ Chaque étape produit un résultat utilisable et testé avant de passer à la su
 | Qt débutant | Courbe d'apprentissage du modèle/vue | Interface minimale d'abord ; logique isolée dans les services |
 | Schéma de données | Évolutions une fois les données réelles saisies | Alembic dès la fin de l'étape 2 |
 | Budget parent/enfant | Somme des sous-catégories ou saisie indépendante | Tranché à l'étape 5 : le parent est un total ; ligne « sans sous-catégorie » pour son budget propre |
-| Horizon des échéances | Durée de génération à l'avance | Paramètre `horizon_months` du service (3 mois) ; réglage dans l'interface à envisager à l'étape 6 |
-| Sauvegarde | Perte du fichier de données | Sauvegardes automatiques à l'étape 6 ; d'ici là, copie manuelle |
+| Horizon des échéances | Durée de génération à l'avance | Réglable dans les préférences (1 à 24 mois, 3 par défaut) |
+| Sauvegarde | Perte du fichier de données | Sauvegarde quotidienne vérifiée avec rotation, copie avant migration, sauvegarde manuelle |
+| Exécutable Windows non signé | Avertissement SmartScreen au premier lancement | Documenté dans le README ; signature de code hors périmètre (payante) |
+| Workflows de publication | `release.yml` n'a pas pu être exécuté avant sa première utilisation | À valider sur un premier tag ; le test de fumée de `ci.yml` couvre l'essentiel |

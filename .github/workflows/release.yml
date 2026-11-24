@@ -1,0 +1,65 @@
+name: Publication
+
+# Se déclenche quand on pousse un tag de version, par exemple :
+#   git tag v1.0.0 && git push origin v1.0.0
+# Le tag doit correspondre à la version du code (`__version__` et pyproject.toml).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write  # nécessaire pour créer la publication et y déposer les archives
+
+jobs:
+  publish:
+    name: Publier (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Dépendances système Qt (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 \
+            libdbus-1-3 libxcb-cursor0
+
+      - run: uv sync
+
+      - name: Le tag correspond à la version du code
+        shell: bash
+        run: |
+          uv run python -c "import budget, os, sys; tag = os.environ['GITHUB_REF_NAME']; sys.exit(0 if tag == 'v' + budget.__version__ else f'Le tag {tag} ne correspond pas à la version {budget.__version__}')"
+
+      - name: Tests
+        run: uv run pytest
+
+      - name: Construction avec PyInstaller
+        run: uv run pyinstaller --noconfirm budget-familial.spec
+
+      - name: Test de fumée de l'exécutable
+        run: uv run python packaging/smoke_test.py dist/budget-familial
+
+      - name: Archive de distribution
+        id: archive
+        shell: bash
+        run: |
+          path=$(uv run python packaging/make_archive.py dist/budget-familial | tail -n 1)
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      # Les deux systèmes créent la publication : le premier gagne, l'autre l'ignore.
+      - name: Créer la publication (si elle n'existe pas encore)
+        shell: bash
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "Budget familial ${GITHUB_REF_NAME#v}" || true
+
+      - name: Déposer l'archive dans la publication
+        shell: bash
+        run: gh release upload "$GITHUB_REF_NAME" "${{ steps.archive.outputs.path }}" --clobber

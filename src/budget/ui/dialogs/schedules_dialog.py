@@ -19,12 +19,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from budget.services import lookups
 from budget.services import schedules as sch
 from budget.services.choices import load_choices
+from budget.settings import SettingsStore
 from budget.ui.dialogs.common import confirm, run_action
 from budget.ui.dialogs.schedule_form_dialog import ScheduleFormDialog, ScheduleInput
+from budget.ui.geometry import RememberedSizeDialog
 from budget.ui.models.schedule_model import COL_LABEL, ScheduleTableModel
 
 
-class SchedulesDialog(QDialog):
+class SchedulesDialog(RememberedSizeDialog):
     """Gestion des échéances.
 
     Chaque création ou modification est suivie d'une génération des opérations dues : on voit
@@ -36,11 +38,14 @@ class SchedulesDialog(QDialog):
         session_factory: sessionmaker[Session],
         *,
         today: dt.date | None = None,
+        horizon_months: int = sch.DEFAULT_HORIZON_MONTHS,
+        store: SettingsStore | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(store, "schedules", parent)
         self._factory = session_factory
         self._today = today or dt.date.today()
+        self._horizon_months = horizon_months
         self.setWindowTitle("Échéances")
         self.resize(960, 460)
 
@@ -81,6 +86,7 @@ class SchedulesDialog(QDialog):
         layout.addLayout(buttons)
 
         self._reload()
+        self.restore_saved_size()
 
     # --- Affichage -------------------------------------------------------------------------
 
@@ -136,7 +142,9 @@ class SchedulesDialog(QDialog):
             schedule = sch.create_schedule(session, data)
         else:
             schedule = sch.update_schedule(session, schedule_id, data)
-        result = sch.generate_due_transactions(session, today=self._today)
+        result = sch.generate_due_transactions(
+            session, today=self._today, horizon_months=self._horizon_months
+        )
         return schedule.id, result
 
     def _on_new(self) -> None:

@@ -30,9 +30,15 @@ def qapp() -> QApplication:
 
 
 @pytest.fixture
-def factory(tmp_path: Path) -> Iterator[sessionmaker]:  # type: ignore[type-arg]
+def database(tmp_path: Path) -> Path:
+    """Chemin du fichier de données de test."""
+    return tmp_path / "budget.sqlite"
+
+
+@pytest.fixture
+def factory(database: Path) -> Iterator[sessionmaker]:  # type: ignore[type-arg]
     """Base de données de fichier, migrée comme au vrai démarrage."""
-    engine = create_db_engine(tmp_path / "budget.sqlite")
+    engine = create_db_engine(database)
     upgrade_to_head(engine)
     session_factory = make_session_factory(engine)
     with unit_of_work(session_factory) as session:
