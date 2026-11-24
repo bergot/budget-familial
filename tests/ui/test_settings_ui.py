@@ -150,13 +150,14 @@ def test_dialogs_remember_their_size(qapp, factory: Factory, make, key: str) -> 
     store = SettingsStore()
     first = make(factory, store)
     first.resize(661, 413)
+    obtained = (first.width(), first.height())  # la taille obtenue peut différer de la demandée
     assert store.settings.geometry(key) is None  # rien n'est mémorisé avant la fermeture
 
     first.done(0)
 
     assert store.settings.geometry(key)
     second = make(factory, store)
-    assert (second.width(), second.height()) == (661, 413)
+    assert (second.width(), second.height()) == obtained
 
 
 def test_the_size_is_saved_whatever_the_way_the_dialog_closes(qapp, factory: Factory) -> None:  # type: ignore[no-untyped-def]
@@ -178,11 +179,12 @@ def test_the_size_survives_a_restart(qapp, factory: Factory, tmp_path: Path) -> 
     path = tmp_path / "settings.json"
     first = BudgetDialog(factory, today=TODAY, store=SettingsStore.load(path))
     first.resize(677, 444)
+    obtained = (first.width(), first.height())
     first.done(0)
 
     assert "budget" in path.read_text(encoding="utf-8")  # écrit sur le disque
     reloaded = BudgetDialog(factory, today=TODAY, store=SettingsStore.load(path))
-    assert (reloaded.width(), reloaded.height()) == (677, 444)
+    assert (reloaded.width(), reloaded.height()) == obtained
 
 
 def test_damaged_geometry_data_is_ignored(qapp, factory: Factory) -> None:  # type: ignore[no-untyped-def]
@@ -197,15 +199,21 @@ def test_the_main_window_remembers_its_size_and_splitter(
 ) -> None:  # type: ignore[no-untyped-def]
     store = SettingsStore()
     first = make_window(factory, database, store)
+    # Sous Windows, la barre d'outils impose à la fenêtre une largeur minimale (environ 770 px) :
+    # la taille demandée n'est pas toujours celle obtenue. On reproduit cette contrainte ici pour
+    # que le test se comporte de la même façon partout, et on compare à la taille *obtenue*.
+    first.setMinimumWidth(780)
     first.resize(733, 561)
-    first._splitter.setSizes([250, 450])
+    first._splitter.setSizes([150, 550])  # un partage très différent du partage par défaut
+    obtained = (first.width(), first.height())
+    assert obtained != (1250, 700)  # sinon le test ne prouverait rien
     first.close()
 
     assert store.settings.geometry("main") and store.settings.geometry("main_splitter")
     second = make_window(factory, database, store)
-    assert (second.width(), second.height()) == (733, 561)
+    assert (second.width(), second.height()) == obtained
     left, right = second._splitter.sizes()
-    assert left < right and abs(left - 250) < 40  # les proportions du séparateur sont conservées
+    assert left / (left + right) < 0.28  # proportions conservées (par défaut : environ 0,34)
 
 
 def test_the_main_window_starts_with_a_default_size_the_first_time(
@@ -464,7 +472,9 @@ def test_open_the_backup_folder(
 
     window.act_open_backups.trigger()
 
-    assert opened == [str(folder)]
+    # QUrl.toLocalFile() renvoie des « / » même sous Windows : on compare des chemins,
+    # pas des chaînes.
+    assert [Path(url) for url in opened] == [folder]
     assert folder.is_dir()  # créé pour que l'explorateur ait quelque chose à ouvrir
 
 
