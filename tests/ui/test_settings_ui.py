@@ -6,6 +6,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -543,7 +544,7 @@ def test_smoke_test_runs_as_a_real_process(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    with sqlite3.connect(database) as connection:  # migrations appliquées jusqu'à la dernière
+    with closing(sqlite3.connect(database)) as connection:  # migrations appliquées : la dernière
         from alembic.script import ScriptDirectory
 
         from budget.db.migrate import _config

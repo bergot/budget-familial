@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 TIMEOUT_SECONDS = 120
@@ -37,6 +38,19 @@ def expected_head() -> str:
     return head
 
 
+def read_schema_state(database: Path) -> tuple[tuple[str, ...] | None, int]:
+    """Version du schéma et nombre de moyens de paiement de la base, connexion fermée ensuite.
+
+    Attention : `with sqlite3.connect(...) as connexion:` valide la transaction à la sortie du
+    bloc mais **ne ferme pas** la connexion. Sous Windows, un fichier encore ouvert ne peut pas
+    être supprimé : le nettoyage du dossier temporaire échouait. `closing()` la ferme vraiment.
+    """
+    with closing(sqlite3.connect(database)) as connection:
+        version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        methods = connection.execute("SELECT count(*) FROM payment_methods").fetchone()[0]
+    return version, methods
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         return fail("usage : smoke_test.py <dossier de l'exécutable>")
@@ -45,7 +59,9 @@ def main(argv: list[str]) -> int:
     if not executable.is_file():
         return fail(f"exécutable introuvable : {executable}")
 
-    with tempfile.TemporaryDirectory() as temporary:
+    # `ignore_cleanup_errors` : sous Windows, un antivirus peut retenir un fichier un instant ;
+    # un nettoyage raté ne doit pas faire échouer un test de fumée qui a réussi.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
         work = Path(temporary)
         database = work / "essai.sqlite"
         env = {
@@ -81,9 +97,7 @@ def main(argv: list[str]) -> int:
             return fail("la base de données n'a pas été créée")
 
         head = expected_head()
-        with sqlite3.connect(database) as connection:
-            version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            methods = connection.execute("SELECT count(*) FROM payment_methods").fetchone()[0]
+        version, methods = read_schema_state(database)
         if version != (head,):
             return fail(
                 f"schéma en version {version}, attendu {head} : migrations mal embarquées ?"
